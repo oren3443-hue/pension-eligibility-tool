@@ -17,7 +17,8 @@ type XlsxRuntime = {
   }
 }
 
-const ACTIVE_EMPLOYEE_REQUIRED_HEADERS = [
+// Active employees ("עובדים פעילים מיכפל")
+const ACTIVE_EMPLOYEE_REQUIRED_HEADERS: readonly string[] = [
   "מס'",
   'מספר זהות/דרכון',
   'שם משפחה',
@@ -27,21 +28,22 @@ const ACTIVE_EMPLOYEE_REQUIRED_HEADERS = [
   'מספר טלפון',
 ] as const
 
-const GMAL_REQUIRED_HEADERS = [
+// Employee details ("פרטי עובד מיכפל") — combined name + מין column
+const EMPLOYEE_DETAILS_REQUIRED_HEADERS: readonly string[] = [
+  'עובד',
+  'שם',
+  'מספר תעודת זהות',
+  'תאריך לידה',
+  'מין',
+  'תחילת עבודה',
+] as const
+
+// Gmal report ("דוח הרכב שכר וגמל מיכפל") — single סוג קופה column
+const GMAL_REQUIRED_HEADERS: readonly string[] = [
   'מספר עובד',
   'מספר זהות',
   'שם הקופה',
-  'סוג קופה1',
-] as const
-
-const EMPLOYEE_DETAILS_REQUIRED_HEADERS = [
-  'מספר עובד',
-  'שם פרטי',
-  'שם משפחה',
-  'מספר זהות',
-  'קוד מין',
-  'תאריך לידה',
-  'תאריך תחילת עבודה',
+  'סוג קופה',
 ] as const
 
 type RawSheetRows = unknown[][]
@@ -214,13 +216,11 @@ function detectFileKind(headers: string[]): DetectionResult {
   const employeeMatchCount = countMatchedHeaders(headers, ACTIVE_EMPLOYEE_REQUIRED_HEADERS)
   const employeeDetailsMatchCount = countMatchedHeaders(headers, EMPLOYEE_DETAILS_REQUIRED_HEADERS)
   const gmalMatchCount = countMatchedHeaders(headers, GMAL_REQUIRED_HEADERS)
-  const hasFullEmployeeMatch =
-    employeeMatchCount === ACTIVE_EMPLOYEE_REQUIRED_HEADERS.length
+  const hasFullEmployeeMatch = employeeMatchCount === ACTIVE_EMPLOYEE_REQUIRED_HEADERS.length
   const hasFullEmployeeDetailsMatch =
     employeeDetailsMatchCount === EMPLOYEE_DETAILS_REQUIRED_HEADERS.length
   const hasFullGmalMatch = gmalMatchCount === GMAL_REQUIRED_HEADERS.length
 
-  // Active employees has the most distinctive header (מס'), prefer it first.
   if (hasFullEmployeeMatch && headers.includes("מס'")) {
     return { kind: 'employee_list', candidateKind: 'employee_list', missingHeaders: [] }
   }
@@ -237,10 +237,13 @@ function detectFileKind(headers: string[]): DetectionResult {
     return { kind: 'employee_list', candidateKind: 'employee_list', missingHeaders: [] }
   }
 
-  // Fallback: rank by best partial match.
   const ranked: Array<{ kind: UploadedFileKind; count: number; required: readonly string[] }> = [
     { kind: 'employee_list', count: employeeMatchCount, required: ACTIVE_EMPLOYEE_REQUIRED_HEADERS },
-    { kind: 'employee_details', count: employeeDetailsMatchCount, required: EMPLOYEE_DETAILS_REQUIRED_HEADERS },
+    {
+      kind: 'employee_details',
+      count: employeeDetailsMatchCount,
+      required: EMPLOYEE_DETAILS_REQUIRED_HEADERS,
+    },
     { kind: 'gmal_report', count: gmalMatchCount, required: GMAL_REQUIRED_HEADERS },
   ]
   ranked.sort((a, b) => b.count - a.count)
@@ -312,24 +315,23 @@ function parseEmployeeDetailsRows(rows: RawSheetRows, xlsx: XlsxRuntime): Employ
   const emailIdx = findHeaderIndexByContains(rows[0] ?? [], 'דוא')
 
   for (const row of rows.slice(1)) {
-    const employeeId = normalizeIdentifier(row[headerIndex.get(canonicalizeHeader('מספר עובד')) ?? -1])
-    const firstName = normalizeText(row[headerIndex.get(canonicalizeHeader('שם פרטי')) ?? -1])
-    const lastName = normalizeText(row[headerIndex.get(canonicalizeHeader('שם משפחה')) ?? -1])
-    const name = [firstName, lastName].filter(Boolean).join(' ')
+    const employeeId = normalizeIdentifier(row[headerIndex.get(canonicalizeHeader('עובד')) ?? -1])
+    const fullName = normalizeText(row[headerIndex.get(canonicalizeHeader('שם')) ?? -1])
+    const firstName = extractFirstName(fullName)
 
-    if (!employeeId || !name) {
+    if (!employeeId || !fullName) {
       continue
     }
 
     employees.push({
       employeeId,
-      name,
+      name: fullName,
       firstName,
       nationalId: normalizeIdentifier(
-        row[headerIndex.get(canonicalizeHeader('מספר זהות')) ?? -1],
+        row[headerIndex.get(canonicalizeHeader('מספר תעודת זהות')) ?? -1],
       ),
       stopDate: parseExcelDate(
-        row[headerIndex.get(canonicalizeHeader('תאריך הפסקת עבודה')) ?? -1],
+        row[headerIndex.get(canonicalizeHeader('הפסקת עבודה')) ?? -1],
         xlsx,
       ),
       stopReason: '',
@@ -337,21 +339,28 @@ function parseEmployeeDetailsRows(rows: RawSheetRows, xlsx: XlsxRuntime): Employ
         row[headerIndex.get(canonicalizeHeader('תאריך לידה')) ?? -1],
         xlsx,
       ),
-      gender: normalizeText(row[headerIndex.get(canonicalizeHeader('קוד מין')) ?? -1]),
+      gender: normalizeText(row[headerIndex.get(canonicalizeHeader('מין')) ?? -1]),
       startDate: parseExcelDate(
-        row[headerIndex.get(canonicalizeHeader('תאריך תחילת עבודה')) ?? -1],
+        row[headerIndex.get(canonicalizeHeader('תחילת עבודה')) ?? -1],
         xlsx,
       ),
       email: emailIdx >= 0 ? normalizeText(row[emailIdx]) : '',
-      phone: normalizePhone(row[headerIndex.get(canonicalizeHeader('טלפון')) ?? -1]),
-      department: normalizeText(row[headerIndex.get(canonicalizeHeader('שם מחלקה')) ?? -1]),
-      city: normalizeText(row[headerIndex.get(canonicalizeHeader('כתובת - ישוב')) ?? -1]),
-      address: normalizeText(row[headerIndex.get(canonicalizeHeader('כתובת')) ?? -1]),
+      phone: '',
+      department: '',
+      city: '',
+      address: '',
       sourceVariant: 'active',
     })
   }
 
   return employees
+}
+
+// Michpal "שם" column is "<last> <first>" (last name first). Take the second token as the first name.
+function extractFirstName(fullName: string): string {
+  const parts = fullName.split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) return parts[1]
+  return parts[0] ?? ''
 }
 
 export function mergeEmployeeSources(
