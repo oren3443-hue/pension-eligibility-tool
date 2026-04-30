@@ -1,0 +1,559 @@
+import type {
+  CoverageRecord,
+  EmployeeRecord,
+  MergedEmployeeRecord,
+  ParsedUploadedFile,
+  UploadedFileKind,
+} from '../types'
+
+type XlsxModule = typeof import('xlsx')
+type XlsxWorkbook = import('xlsx').WorkBook
+type XlsxWorksheet = import('xlsx').WorkSheet
+type XlsxRuntime = {
+  read: XlsxModule['read']
+  utils: XlsxModule['utils']
+  SSF: {
+    parse_date_code: (value: number) => { y: number; m: number; d: number } | null
+  }
+}
+
+const ACTIVE_EMPLOYEE_REQUIRED_HEADERS = [
+  "מס'",
+  'מספר זהות/דרכון',
+  'שם משפחה',
+  'שם פרטי',
+  'תאריך לידה',
+  'תחילת עבודה',
+  'מספר טלפון',
+] as const
+
+const GMAL_REQUIRED_HEADERS = [
+  'מספר עובד',
+  'מספר זהות',
+  'שם הקופה',
+  'סוג קופה1',
+] as const
+
+const EMPLOYEE_DETAILS_REQUIRED_HEADERS = [
+  'מספר עובד',
+  'שם פרטי',
+  'שם משפחה',
+  'מספר זהות',
+  'קוד מין',
+  'תאריך לידה',
+  'תאריך תחילת עבודה',
+] as const
+
+type RawSheetRows = unknown[][]
+
+interface DetectionResult {
+  kind: UploadedFileKind | 'unknown'
+  candidateKind: UploadedFileKind | null
+  missingHeaders: string[]
+}
+
+interface SheetParse {
+  sheetName: string
+  rows: RawSheetRows
+  headers: string[]
+  detection: DetectionResult
+}
+
+export async function parseUploadedFile(file: File): Promise<ParsedUploadedFile[]> {
+  const xlsx = await loadXlsx()
+  const arrayBuffer = await file.arrayBuffer()
+  const workbook = xlsx.read(arrayBuffer, {
+    type: 'array',
+    cellDates: true,
+    dense: true,
+  })
+
+  const sheetParses = collectSheetParses(workbook, xlsx)
+
+  if (sheetParses.length === 0) {
+    return [
+      {
+        id: `${file.name}-${file.lastModified}`,
+        fileName: file.name,
+        kind: 'unknown',
+        candidateKind: null,
+        rowCount: 0,
+        headers: [],
+        missingHeaders: [],
+        issues: ['הקובץ ריק או שאין בו גיליון עם נתונים.'],
+        employees: [],
+        coverages: [],
+      },
+    ]
+  }
+
+  const knownByKind = new Map<UploadedFileKind, SheetParse>()
+  const unknownSheets: SheetParse[] = []
+
+  for (const sheet of sheetParses) {
+    if (sheet.detection.kind === 'unknown') {
+      unknownSheets.push(sheet)
+      continue
+    }
+
+    if (!knownByKind.has(sheet.detection.kind)) {
+      knownByKind.set(sheet.detection.kind, sheet)
+    }
+  }
+
+  const results: ParsedUploadedFile[] = []
+
+  for (const [kind, sheet] of knownByKind) {
+    const issues: string[] = []
+    if (sheetParses.length > 1) {
+      issues.push(`מתוך הגיליון "${sheet.sheetName}" בקובץ ${file.name}.`)
+    }
+
+    const payload: ParsedUploadedFile = {
+      id: `${file.name}-${file.lastModified}-${sheet.sheetName}`,
+      fileName: file.name,
+      sheetName: sheet.sheetName,
+      kind,
+      candidateKind: kind,
+      rowCount: Math.max(sheet.rows.length - 1, 0),
+      headers: sheet.headers,
+      missingHeaders: [],
+      issues,
+      employees: [],
+      coverages: [],
+    }
+
+    if (kind === 'employee_list') {
+      payload.employees = parseEmployeeRows(sheet.rows, xlsx)
+    } else if (kind === 'employee_details') {
+      payload.employees = parseEmployeeDetailsRows(sheet.rows, xlsx)
+    } else if (kind === 'gmal_report') {
+      payload.coverages = parseCoverageRows(sheet.rows)
+    }
+
+    results.push(payload)
+  }
+
+  if (results.length === 0 && unknownSheets.length > 0) {
+    const best = unknownSheets[0]
+    const issues: string[] = []
+    if (best.detection.candidateKind) {
+      issues.push(
+        `הקובץ דומה ל-${kindLabel(best.detection.candidateKind)}, אבל חסרות כותרות: ${best.detection.missingHeaders.join(', ')}`,
+      )
+    } else {
+      issues.push('לא הצלחנו לזהות את סוג הקובץ לפי הכותרות בשורה הראשונה.')
+    }
+
+    results.push({
+      id: `${file.name}-${file.lastModified}-${best.sheetName}`,
+      fileName: file.name,
+      sheetName: best.sheetName,
+      kind: 'unknown',
+      candidateKind: best.detection.candidateKind,
+      rowCount: Math.max(best.rows.length - 1, 0),
+      headers: best.headers,
+      missingHeaders: best.detection.missingHeaders,
+      issues,
+      employees: [],
+      coverages: [],
+    })
+  }
+
+  return results
+}
+
+export function kindLabel(kind: UploadedFileKind): string {
+  if (kind === 'employee_list') {
+    return 'עובדים פעילים'
+  }
+
+  if (kind === 'employee_details') {
+    return 'פרטי עובד'
+  }
+
+  return 'דוח גמל'
+}
+
+function collectSheetParses(workbook: XlsxWorkbook, xlsx: XlsxRuntime): SheetParse[] {
+  const parses: SheetParse[] = []
+
+  for (const sheetName of workbook.SheetNames) {
+    const worksheet: XlsxWorksheet | undefined = workbook.Sheets[sheetName]
+    if (!worksheet || !worksheet['!ref']) {
+      continue
+    }
+
+    const rows = xlsx.utils.sheet_to_json(worksheet, {
+      header: 1,
+      raw: true,
+      defval: '',
+      blankrows: false,
+    }) as RawSheetRows
+
+    if (rows.length === 0) {
+      continue
+    }
+
+    const [headerRow = []] = rows
+    const headers = headerRow.map((cell) => normalizeText(cell))
+    const detection = detectFileKind(headers)
+
+    parses.push({
+      sheetName,
+      rows,
+      headers,
+      detection,
+    })
+  }
+
+  return parses
+}
+
+function detectFileKind(headers: string[]): DetectionResult {
+  const employeeMatchCount = countMatchedHeaders(headers, ACTIVE_EMPLOYEE_REQUIRED_HEADERS)
+  const employeeDetailsMatchCount = countMatchedHeaders(headers, EMPLOYEE_DETAILS_REQUIRED_HEADERS)
+  const gmalMatchCount = countMatchedHeaders(headers, GMAL_REQUIRED_HEADERS)
+  const hasFullEmployeeMatch =
+    employeeMatchCount === ACTIVE_EMPLOYEE_REQUIRED_HEADERS.length
+  const hasFullEmployeeDetailsMatch =
+    employeeDetailsMatchCount === EMPLOYEE_DETAILS_REQUIRED_HEADERS.length
+  const hasFullGmalMatch = gmalMatchCount === GMAL_REQUIRED_HEADERS.length
+
+  // Active employees has the most distinctive header (מס'), prefer it first.
+  if (hasFullEmployeeMatch && headers.includes("מס'")) {
+    return { kind: 'employee_list', candidateKind: 'employee_list', missingHeaders: [] }
+  }
+
+  if (hasFullGmalMatch && !hasFullEmployeeMatch) {
+    return { kind: 'gmal_report', candidateKind: 'gmal_report', missingHeaders: [] }
+  }
+
+  if (hasFullEmployeeDetailsMatch && !hasFullEmployeeMatch && !hasFullGmalMatch) {
+    return { kind: 'employee_details', candidateKind: 'employee_details', missingHeaders: [] }
+  }
+
+  if (hasFullEmployeeMatch) {
+    return { kind: 'employee_list', candidateKind: 'employee_list', missingHeaders: [] }
+  }
+
+  // Fallback: rank by best partial match.
+  const ranked: Array<{ kind: UploadedFileKind; count: number; required: readonly string[] }> = [
+    { kind: 'employee_list', count: employeeMatchCount, required: ACTIVE_EMPLOYEE_REQUIRED_HEADERS },
+    { kind: 'employee_details', count: employeeDetailsMatchCount, required: EMPLOYEE_DETAILS_REQUIRED_HEADERS },
+    { kind: 'gmal_report', count: gmalMatchCount, required: GMAL_REQUIRED_HEADERS },
+  ]
+  ranked.sort((a, b) => b.count - a.count)
+  const best = ranked[0]
+
+  if (best.count === 0) {
+    return { kind: 'unknown', candidateKind: null, missingHeaders: [] }
+  }
+
+  return {
+    kind: 'unknown',
+    candidateKind: best.kind,
+    missingHeaders: getMissingHeaders(headers, best.required),
+  }
+}
+
+function parseEmployeeRows(rows: RawSheetRows, xlsx: XlsxRuntime): EmployeeRecord[] {
+  const headerIndex = createHeaderIndex(rows[0] ?? [])
+  const employees: EmployeeRecord[] = []
+
+  for (const row of rows.slice(1)) {
+    const employeeId = normalizeIdentifier(row[headerIndex.get(canonicalizeHeader("מס'")) ?? -1])
+    const firstName = normalizeText(row[headerIndex.get(canonicalizeHeader('שם פרטי')) ?? -1])
+    const lastName = normalizeText(row[headerIndex.get(canonicalizeHeader('שם משפחה')) ?? -1])
+    const name = [firstName, lastName].filter(Boolean).join(' ')
+
+    if (!employeeId || !name) {
+      continue
+    }
+
+    const houseNumber = normalizeText(row[headerIndex.get(canonicalizeHeader("מס' בית")) ?? -1])
+    const street = normalizeText(row[headerIndex.get(canonicalizeHeader('כתובת')) ?? -1])
+    const city = normalizeText(row[headerIndex.get(canonicalizeHeader('ישוב')) ?? -1])
+    const stopReason = normalizeText(row[headerIndex.get(canonicalizeHeader('קוד הפסקה')) ?? -1])
+
+    employees.push({
+      employeeId,
+      name,
+      firstName,
+      nationalId: normalizeIdentifier(
+        row[headerIndex.get(canonicalizeHeader('מספר זהות/דרכון')) ?? -1],
+      ),
+      stopDate: parseExcelDate(
+        row[headerIndex.get(canonicalizeHeader('תאריך הפסקה')) ?? -1],
+        xlsx,
+      ),
+      stopReason,
+      birthDate: parseExcelDate(row[headerIndex.get(canonicalizeHeader('תאריך לידה')) ?? -1], xlsx),
+      gender: normalizeText(row[headerIndex.get(canonicalizeHeader('מין')) ?? -1]),
+      startDate: parseExcelDate(
+        row[headerIndex.get(canonicalizeHeader('תחילת עבודה')) ?? -1],
+        xlsx,
+      ),
+      email: normalizeText(row[headerIndex.get(canonicalizeHeader('דוא"ל')) ?? -1]),
+      phone: normalizePhone(row[headerIndex.get(canonicalizeHeader('מספר טלפון')) ?? -1]),
+      department: normalizeText(row[headerIndex.get(canonicalizeHeader('מחלקה')) ?? -1]),
+      city,
+      address: [street, houseNumber, city].filter(Boolean).join(' '),
+      sourceVariant: 'active',
+    })
+  }
+
+  return employees
+}
+
+function parseEmployeeDetailsRows(rows: RawSheetRows, xlsx: XlsxRuntime): EmployeeRecord[] {
+  const headerIndex = createHeaderIndex(rows[0] ?? [])
+  const employees: EmployeeRecord[] = []
+  const emailIdx = findHeaderIndexByContains(rows[0] ?? [], 'דוא')
+
+  for (const row of rows.slice(1)) {
+    const employeeId = normalizeIdentifier(row[headerIndex.get(canonicalizeHeader('מספר עובד')) ?? -1])
+    const firstName = normalizeText(row[headerIndex.get(canonicalizeHeader('שם פרטי')) ?? -1])
+    const lastName = normalizeText(row[headerIndex.get(canonicalizeHeader('שם משפחה')) ?? -1])
+    const name = [firstName, lastName].filter(Boolean).join(' ')
+
+    if (!employeeId || !name) {
+      continue
+    }
+
+    employees.push({
+      employeeId,
+      name,
+      firstName,
+      nationalId: normalizeIdentifier(
+        row[headerIndex.get(canonicalizeHeader('מספר זהות')) ?? -1],
+      ),
+      stopDate: parseExcelDate(
+        row[headerIndex.get(canonicalizeHeader('תאריך הפסקת עבודה')) ?? -1],
+        xlsx,
+      ),
+      stopReason: '',
+      birthDate: parseExcelDate(
+        row[headerIndex.get(canonicalizeHeader('תאריך לידה')) ?? -1],
+        xlsx,
+      ),
+      gender: normalizeText(row[headerIndex.get(canonicalizeHeader('קוד מין')) ?? -1]),
+      startDate: parseExcelDate(
+        row[headerIndex.get(canonicalizeHeader('תאריך תחילת עבודה')) ?? -1],
+        xlsx,
+      ),
+      email: emailIdx >= 0 ? normalizeText(row[emailIdx]) : '',
+      phone: normalizePhone(row[headerIndex.get(canonicalizeHeader('טלפון')) ?? -1]),
+      department: normalizeText(row[headerIndex.get(canonicalizeHeader('שם מחלקה')) ?? -1]),
+      city: normalizeText(row[headerIndex.get(canonicalizeHeader('כתובת - ישוב')) ?? -1]),
+      address: normalizeText(row[headerIndex.get(canonicalizeHeader('כתובת')) ?? -1]),
+      sourceVariant: 'active',
+    })
+  }
+
+  return employees
+}
+
+export function mergeEmployeeSources(
+  activeEmployees: EmployeeRecord[],
+  detailEmployees: EmployeeRecord[],
+): MergedEmployeeRecord[] {
+  const detailsByEmployeeId = new Map(detailEmployees.map((employee) => [employee.employeeId, employee]))
+  const detailsByNationalId = new Map(
+    detailEmployees
+      .filter((employee) => employee.nationalId)
+      .map((employee) => [employee.nationalId, employee]),
+  )
+
+  return activeEmployees.map((employee) => {
+    const detailMatch =
+      detailsByEmployeeId.get(employee.employeeId) ??
+      (employee.nationalId ? detailsByNationalId.get(employee.nationalId) : undefined)
+
+    return {
+      ...employee,
+      firstName: employee.firstName || detailMatch?.firstName || '',
+      birthDate: employee.birthDate ?? detailMatch?.birthDate ?? null,
+      gender: employee.gender || detailMatch?.gender || '',
+      email: employee.email || detailMatch?.email || '',
+      startDate: employee.startDate ?? detailMatch?.startDate ?? null,
+      stopDate: employee.stopDate ?? detailMatch?.stopDate ?? null,
+      detailsFound: Boolean(detailMatch),
+    }
+  })
+}
+
+function parseCoverageRows(rows: RawSheetRows): CoverageRecord[] {
+  const headerIndex = createHeaderIndex(rows[0] ?? [])
+  const coverages: CoverageRecord[] = []
+
+  for (const row of rows.slice(1)) {
+    const employeeId = normalizeIdentifier(row[headerIndex.get(canonicalizeHeader('מספר עובד')) ?? -1])
+    const employeeName = normalizeText(
+      row[headerIndex.get(canonicalizeHeader('שם העובד')) ?? -1] ??
+        row[headerIndex.get(canonicalizeHeader('שם')) ?? -1],
+    )
+
+    if (!employeeId) {
+      continue
+    }
+
+    const taxYearValue = row[headerIndex.get(canonicalizeHeader('שנת מס')) ?? -1]
+    const parsedYear =
+      typeof taxYearValue === 'number'
+        ? taxYearValue
+        : Number.parseInt(normalizeText(taxYearValue), 10)
+
+    const fundType1 = normalizeText(row[headerIndex.get(canonicalizeHeader('סוג קופה1')) ?? -1])
+    const fundType2 = normalizeText(row[headerIndex.get(canonicalizeHeader('סוג קופה2')) ?? -1])
+    const fundTypeCombined = [fundType1, fundType2].filter(Boolean).join(' / ') ||
+      normalizeText(row[headerIndex.get(canonicalizeHeader('סוג קופה')) ?? -1])
+
+    coverages.push({
+      employeeId,
+      employeeName,
+      nationalId: normalizeIdentifier(row[headerIndex.get(canonicalizeHeader('מספר זהות')) ?? -1]),
+      fundName: normalizeText(row[headerIndex.get(canonicalizeHeader('שם הקופה')) ?? -1]),
+      fundType: fundTypeCombined,
+      taxYear: Number.isNaN(parsedYear) ? null : parsedYear,
+    })
+  }
+
+  return coverages
+}
+
+function countMatchedHeaders(
+  headers: string[],
+  requiredHeaders: readonly string[],
+): number {
+  const headerSet = new Set(headers.map(canonicalizeHeader))
+  return requiredHeaders.filter((header) => headerSet.has(canonicalizeHeader(header))).length
+}
+
+function getMissingHeaders(
+  headers: string[],
+  requiredHeaders: readonly string[],
+): string[] {
+  const headerSet = new Set(headers.map(canonicalizeHeader))
+  return requiredHeaders.filter((header) => !headerSet.has(canonicalizeHeader(header)))
+}
+
+function createHeaderIndex(headerRow: unknown[]): Map<string, number> {
+  const index = new Map<string, number>()
+
+  for (const [cellIndex, value] of headerRow.entries()) {
+    const normalized = canonicalizeHeader(normalizeText(value))
+    if (normalized) {
+      index.set(normalized, cellIndex)
+    }
+  }
+
+  return index
+}
+
+function findHeaderIndexByContains(headerRow: unknown[], needle: string): number {
+  for (const [cellIndex, value] of headerRow.entries()) {
+    const normalized = normalizeText(value)
+    if (normalized.includes(needle)) {
+      return cellIndex
+    }
+  }
+  return -1
+}
+
+function normalizeIdentifier(value: unknown): string {
+  if (typeof value === 'number') {
+    return Number.isInteger(value) ? String(value) : String(value).replace(/\.0+$/, '')
+  }
+
+  return normalizeText(value)
+}
+
+function normalizePhone(value: unknown): string {
+  const digitsOnly = normalizeIdentifier(value).replace(/\D+/g, '')
+  if (!digitsOnly) {
+    return ''
+  }
+
+  if (digitsOnly.startsWith('972')) {
+    return digitsOnly
+  }
+
+  if (digitsOnly.length === 9) {
+    return `0${digitsOnly}`
+  }
+
+  return digitsOnly
+}
+
+function parseExcelDate(value: unknown, xlsx: XlsxRuntime): Date | null {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) {
+      return null
+    }
+
+    return new Date(value.getFullYear(), value.getMonth(), value.getDate())
+  }
+
+  if (typeof value === 'number') {
+    const parsed = xlsx.SSF.parse_date_code(value)
+    if (!parsed) {
+      return null
+    }
+
+    return new Date(parsed.y, parsed.m - 1, parsed.d)
+  }
+
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  const trimmed = normalizeText(value)
+  if (!trimmed) {
+    return null
+  }
+
+  const hebrewStyle = trimmed.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/)
+  if (hebrewStyle) {
+    const [, day, month, year] = hebrewStyle
+    const normalizedYear = year.length === 2 ? `20${year}` : year
+    const parsed = new Date(
+      Number.parseInt(normalizedYear, 10),
+      Number.parseInt(month, 10) - 1,
+      Number.parseInt(day, 10),
+    )
+    return Number.isNaN(parsed.getTime()) ? null : parsed
+  }
+
+  const direct = new Date(trimmed)
+  if (!Number.isNaN(direct.getTime())) {
+    return direct
+  }
+
+  return null
+}
+
+let xlsxPromise: Promise<XlsxRuntime> | null = null
+
+async function loadXlsx(): Promise<XlsxRuntime> {
+  if (!xlsxPromise) {
+    xlsxPromise = import('xlsx').then((module) => {
+      const runtime = ((module as unknown as { default?: unknown }).default ??
+        module) as XlsxRuntime
+      return runtime
+    })
+  }
+
+  return xlsxPromise
+}
+
+function canonicalizeHeader(value: string): string {
+  return value.replace(/[\s"'`´׳״._-]+/gu, '')
+}
+
+function normalizeText(value: unknown): string {
+  return String(value ?? '')
+    .replace(/ /g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
