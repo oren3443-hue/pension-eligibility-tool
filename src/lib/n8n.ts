@@ -4,7 +4,7 @@ import { formatMonth } from './pension'
 
 const DEFAULT_N8N_BASE_URL =
   (import.meta as unknown as { env?: { VITE_N8N_BASE_URL?: string } }).env?.VITE_N8N_BASE_URL ??
-  'https://n8n.example.com/webhook'
+  'https://orenmeshi.app.n8n.cloud/webhook'
 
 const PAYROLL_EMAIL = 'payroll@orenmeshi.com'
 
