@@ -34,12 +34,14 @@ export function renderTemplate(
   const firstName = row.firstName || row.name.split(' ')[0] || ''
   const eligibilityMonth = row.eligibilityMonth ? formatMonth(row.eligibilityMonth) : 'הקרוב'
   const deadlineDate = formatDeadlineDate(row.eligibilityMonth, deadlineOverride)
+  const primaryFund = row.primaryFund || ''
 
   return template
     .replace(/\{\{\s*first_name\s*\}\}/g, firstName)
     .replace(/\{\{\s*eligibility_month\s*\}\}/g, eligibilityMonth)
     .replace(/\{\{\s*payroll_email\s*\}\}/g, PAYROLL_EMAIL)
     .replace(/\{\{\s*deadline_date\s*\}\}/g, deadlineDate)
+    .replace(/\{\{\s*primary_fund\s*\}\}/g, primaryFund)
 }
 
 // Default deadline = 15th of the eligibility month, unless override is provided.

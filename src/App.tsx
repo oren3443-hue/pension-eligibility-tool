@@ -84,6 +84,15 @@ const TEMPLATE_PRESET_B = `שלום {{first_name}},
 בהצלחה,
 מחלקת שכר, אורן משי 🩵`
 
+const TEMPLATE_PRESET_C = `שלום {{first_name}},
+
+עדכון קצר ממחלקת השכר: הפרשות הפנסיה שלך פעילות בקופה {{primary_fund}}.
+
+אם ברצונך לשנות פרטי קופה, להוסיף מסמכים או לעדכן פרטים — אנא שלח/י אותם למייל: {{payroll_email}}.
+
+תודה,
+מחלקת שכר, אורן משי 🩵`
+
 const DEFAULT_TEMPLATE_TEXT = TEMPLATE_PRESET_A
 
 const SLOT_GUIDES: Record<SlotKey, { title: string; subtitle: string; export: string }> = {
@@ -382,14 +391,10 @@ function App() {
       return
     }
 
-    const eligibleRows = selectedRows.filter(
-      (row) => row.phone && (row.status === 'זכאי החודש' || row.status === 'באיחור'),
-    )
+    const eligibleRows = selectedRows.filter((row) => row.phone)
 
     if (eligibleRows.length === 0) {
-      setActionMessage(
-        'לא נמצאו עובדים נבחרים מתאימים לשליחה (דרוש סטטוס "זכאי החודש" / "באיחור" וטלפון).',
-      )
+      setActionMessage('לא נמצאו עובדים נבחרים עם טלפון. ודא שלעובדים יש מספר טלפון תקין.')
       return
     }
 
@@ -616,8 +621,9 @@ function App() {
                   onClick={() =>
                     setSettings((current) => ({ ...current, templateText: TEMPLATE_PRESET_A }))
                   }
+                  title="הודעה לעובדים בלי קופה — מתחילה הפרשה"
                 >
-                  טען הודעה א
+                  טען הודעה א (תחילת הפרשה)
                 </button>
                 <button
                   type="button"
@@ -625,8 +631,19 @@ function App() {
                   onClick={() =>
                     setSettings((current) => ({ ...current, templateText: TEMPLATE_PRESET_B }))
                   }
+                  title="הודעה לעובדים בלי קופה — סוכן ייצור קשר"
                 >
-                  טען הודעה ב
+                  טען הודעה ב (סוכן ייצור קשר)
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() =>
+                    setSettings((current) => ({ ...current, templateText: TEMPLATE_PRESET_C }))
+                  }
+                  title="הודעה לעובדים שכבר יש להם קופה"
+                >
+                  טען הודעה ג (יש קופה)
                 </button>
               </div>
               <textarea
@@ -643,7 +660,8 @@ function App() {
               <small>
                 המשתנים נכנסים אוטומטית בשליחה. זמינים:{' '}
                 <code>{'{{first_name}}'}</code>, <code>{'{{eligibility_month}}'}</code>,{' '}
-                <code>{'{{deadline_date}}'}</code>, <code>{'{{payroll_email}}'}</code>
+                <code>{'{{deadline_date}}'}</code>, <code>{'{{payroll_email}}'}</code>,{' '}
+                <code>{'{{primary_fund}}'}</code>
               </small>
             </label>
           </div>
@@ -813,7 +831,7 @@ function App() {
                 disabled={isSendingWhatsapp || !sendKeyValid}
                 title={
                   sendKeyValid
-                    ? 'שליחת הודעות וואטסאפ אישיות לעובדים שנבחרו'
+                    ? 'שליחת הודעות WhatsApp לכל העובדים שנבחרו (לכל הסטטוסים — דרוש רק טלפון)'
                     : 'יש להזין מפתח שליחה תקין'
                 }
               >
