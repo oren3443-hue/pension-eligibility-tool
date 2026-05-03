@@ -18,7 +18,6 @@ function makeEmployee(overrides: Partial<EmployeeRecord> = {}): EmployeeRecord {
     department: '',
     city: '',
     address: '',
-    sourceVariant: 'active',
     ...overrides,
   }
 }
@@ -100,7 +99,7 @@ describe('analyzePensionStatus — month 7 rule', () => {
       gender: 'נ',
     })
     const rows = analyzePensionStatus([employee], [], '2026-04')
-    expect(rows[0].status).toBe('באיחור / חסר קופה')
+    expect(rows[0].status).toBe('באיחור')
     expect(rows[0].monthsLate).toBeGreaterThan(0)
   })
 })
@@ -254,5 +253,75 @@ describe('analyzePensionStatus — coverage classification', () => {
     }
     const rows = analyzePensionStatus([employee], [coverage], '2026-04')
     expect(rows[0].hasIdMismatch).toBe(true)
+  })
+
+  // Regression: emp 2115 case — fund "כלל חברה לביטוח" with type "לתגמולים".
+  it('detects קופת גמל לתגמולים as pension coverage', () => {
+    const employee = makeEmployee()
+    const coverage: CoverageRecord = {
+      employeeId: 'E1',
+      employeeName: 'דוגמה',
+      nationalId: '123456789',
+      fundName: 'כלל חברה לביטוח',
+      fundType: 'לתגמולים',
+      taxYear: 2026,
+    }
+    const rows = analyzePensionStatus([employee], [coverage], '2026-04')
+    expect(rows[0].status).toBe('יש קופה')
+    expect(rows[0].coverageKind).toBe('pension')
+  })
+
+  it('detects פיקדון זרים מסתנן (plene spelling) as foreign deposit', () => {
+    const employee = makeEmployee()
+    const coverage: CoverageRecord = {
+      employeeId: 'E1',
+      employeeName: 'דוגמה',
+      nationalId: '123456789',
+      fundName: 'פיקדון זרים מסתנן',
+      fundType: 'אחר',
+      taxYear: 2026,
+    }
+    const rows = analyzePensionStatus([employee], [coverage], '2026-04')
+    expect(rows[0].status).toBe('יש קופה')
+    expect(rows[0].coverageKind).toBe('foreign_deposit')
+  })
+
+  it('rejects אובדן כושר עבודה rider as pension', () => {
+    const employee = makeEmployee({
+      startDate: new Date(2024, 0, 1),
+      birthDate: new Date(1990, 0, 1),
+      gender: 'נ',
+    })
+    const coverage: CoverageRecord = {
+      employeeId: 'E1',
+      employeeName: 'דוגמה',
+      nationalId: '123456789',
+      fundName: 'הראל אובדן כ.ע.',
+      fundType: 'אובדן כ.ע. מעביד',
+      taxYear: 2026,
+    }
+    const rows = analyzePensionStatus([employee], [coverage], '2026-04')
+    expect(rows[0].coverageKind).toBe('none')
+  })
+})
+
+describe('age + birth date on row', () => {
+  it('computes age relative to report month', () => {
+    const employee = makeEmployee({
+      birthDate: new Date(1990, 5, 15),
+      gender: 'נ',
+    })
+    const rows = analyzePensionStatus([employee], [], '2026-04')
+    // Born June 1990, report = April 2026 → still 35 (hasn't had June birthday yet in report month)
+    // computeAge uses report month start (May 1 if report is "2026-04"... actually parseMonthInput gives April 2026 day=1)
+    // April 2026 - June 1990 = 35 years (birthday in June not yet reached)
+    expect(rows[0].age).toBe(35)
+    expect(rows[0].birthDate).toEqual(new Date(1990, 5, 15))
+  })
+
+  it('age is null when birthDate is missing', () => {
+    const employee = makeEmployee({ birthDate: null, gender: '' })
+    const rows = analyzePensionStatus([employee], [], '2026-04')
+    expect(rows[0].age).toBeNull()
   })
 })

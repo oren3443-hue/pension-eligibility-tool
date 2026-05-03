@@ -1,7 +1,6 @@
 import type {
   CoverageRecord,
   EmployeeRecord,
-  MergedEmployeeRecord,
   ParsedUploadedFile,
   UploadedFileKind,
 } from '../types'
@@ -17,28 +16,20 @@ type XlsxRuntime = {
   }
 }
 
-// Active employees ("עובדים פעילים מיכפל")
-const ACTIVE_EMPLOYEE_REQUIRED_HEADERS: readonly string[] = [
-  "מס'",
-  'מספר זהות/דרכון',
-  'שם משפחה',
+// "נתוני עובד" Michpal export — single combined source for active + personal data.
+// Export path: ייצוא > דוחות לאקסל > נתוני עובד > עד קוד הפסקה עבודה - 0
+const EMPLOYEE_DATA_REQUIRED_HEADERS: readonly string[] = [
+  'מספר עובד',
   'שם פרטי',
+  'שם משפחה',
+  'מספר זהות',
+  'קוד מין',
   'תאריך לידה',
-  'תחילת עבודה',
-  'מספר טלפון',
+  'תאריך תחילת עבודה',
 ] as const
 
-// Employee details ("פרטי עובד מיכפל") — combined name + מין column
-const EMPLOYEE_DETAILS_REQUIRED_HEADERS: readonly string[] = [
-  'עובד',
-  'שם',
-  'מספר תעודת זהות',
-  'תאריך לידה',
-  'מין',
-  'תחילת עבודה',
-] as const
-
-// Gmal report ("דוח הרכב שכר וגמל מיכפל") — single סוג קופה column
+// "דוח הרכב שכר וגמל מיכפל" — pension/gemel coverage source.
+// Export path: ייצוא > דוחות לאקסל > הרכב שכר וגמל > ללא שינוי במסננים
 const GMAL_REQUIRED_HEADERS: readonly string[] = [
   'מספר עובד',
   'מספר זהות',
@@ -97,7 +88,6 @@ export async function parseUploadedFile(file: File): Promise<ParsedUploadedFile[
       unknownSheets.push(sheet)
       continue
     }
-
     if (!knownByKind.has(sheet.detection.kind)) {
       knownByKind.set(sheet.detection.kind, sheet)
     }
@@ -125,10 +115,8 @@ export async function parseUploadedFile(file: File): Promise<ParsedUploadedFile[
       coverages: [],
     }
 
-    if (kind === 'employee_list') {
-      payload.employees = parseEmployeeRows(sheet.rows, xlsx)
-    } else if (kind === 'employee_details') {
-      payload.employees = parseEmployeeDetailsRows(sheet.rows, xlsx)
+    if (kind === 'employee_data') {
+      payload.employees = parseEmployeeDataRows(sheet.rows, xlsx)
     } else if (kind === 'gmal_report') {
       payload.coverages = parseCoverageRows(sheet.rows)
     }
@@ -166,84 +154,49 @@ export async function parseUploadedFile(file: File): Promise<ParsedUploadedFile[
 }
 
 export function kindLabel(kind: UploadedFileKind): string {
-  if (kind === 'employee_list') {
-    return 'עובדים פעילים'
+  if (kind === 'employee_data') {
+    return 'נתוני עובד'
   }
-
-  if (kind === 'employee_details') {
-    return 'פרטי עובד'
-  }
-
   return 'דוח גמל'
 }
 
 function collectSheetParses(workbook: XlsxWorkbook, xlsx: XlsxRuntime): SheetParse[] {
   const parses: SheetParse[] = []
-
   for (const sheetName of workbook.SheetNames) {
     const worksheet: XlsxWorksheet | undefined = workbook.Sheets[sheetName]
-    if (!worksheet || !worksheet['!ref']) {
-      continue
-    }
-
+    if (!worksheet || !worksheet['!ref']) continue
     const rows = xlsx.utils.sheet_to_json(worksheet, {
       header: 1,
       raw: true,
       defval: '',
       blankrows: false,
     }) as RawSheetRows
-
-    if (rows.length === 0) {
-      continue
-    }
-
+    if (rows.length === 0) continue
     const [headerRow = []] = rows
     const headers = headerRow.map((cell) => normalizeText(cell))
     const detection = detectFileKind(headers)
-
-    parses.push({
-      sheetName,
-      rows,
-      headers,
-      detection,
-    })
+    parses.push({ sheetName, rows, headers, detection })
   }
-
   return parses
 }
 
 function detectFileKind(headers: string[]): DetectionResult {
-  const employeeMatchCount = countMatchedHeaders(headers, ACTIVE_EMPLOYEE_REQUIRED_HEADERS)
-  const employeeDetailsMatchCount = countMatchedHeaders(headers, EMPLOYEE_DETAILS_REQUIRED_HEADERS)
+  const employeeMatchCount = countMatchedHeaders(headers, EMPLOYEE_DATA_REQUIRED_HEADERS)
   const gmalMatchCount = countMatchedHeaders(headers, GMAL_REQUIRED_HEADERS)
-  const hasFullEmployeeMatch = employeeMatchCount === ACTIVE_EMPLOYEE_REQUIRED_HEADERS.length
-  const hasFullEmployeeDetailsMatch =
-    employeeDetailsMatchCount === EMPLOYEE_DETAILS_REQUIRED_HEADERS.length
+  const hasFullEmployeeMatch = employeeMatchCount === EMPLOYEE_DATA_REQUIRED_HEADERS.length
   const hasFullGmalMatch = gmalMatchCount === GMAL_REQUIRED_HEADERS.length
 
-  if (hasFullEmployeeMatch && headers.includes("מס'")) {
-    return { kind: 'employee_list', candidateKind: 'employee_list', missingHeaders: [] }
-  }
-
-  if (hasFullGmalMatch && !hasFullEmployeeMatch) {
+  // The gmal report includes "מספר עובד" + "מספר זהות" too — distinguishing column is "שם הקופה" / "סוג קופה".
+  if (hasFullGmalMatch) {
     return { kind: 'gmal_report', candidateKind: 'gmal_report', missingHeaders: [] }
   }
 
-  if (hasFullEmployeeDetailsMatch && !hasFullEmployeeMatch && !hasFullGmalMatch) {
-    return { kind: 'employee_details', candidateKind: 'employee_details', missingHeaders: [] }
-  }
-
   if (hasFullEmployeeMatch) {
-    return { kind: 'employee_list', candidateKind: 'employee_list', missingHeaders: [] }
+    return { kind: 'employee_data', candidateKind: 'employee_data', missingHeaders: [] }
   }
 
   const ranked: Array<{ kind: UploadedFileKind; count: number; required: readonly string[] }> = [
-    { kind: 'employee_list', count: employeeMatchCount, required: ACTIVE_EMPLOYEE_REQUIRED_HEADERS },
-    {
-      kind: 'employee_details',
-      count: employeeDetailsMatchCount,
-      required: EMPLOYEE_DETAILS_REQUIRED_HEADERS,
-    },
+    { kind: 'employee_data', count: employeeMatchCount, required: EMPLOYEE_DATA_REQUIRED_HEADERS },
     { kind: 'gmal_report', count: gmalMatchCount, required: GMAL_REQUIRED_HEADERS },
   ]
   ranked.sort((a, b) => b.count - a.count)
@@ -260,12 +213,13 @@ function detectFileKind(headers: string[]): DetectionResult {
   }
 }
 
-function parseEmployeeRows(rows: RawSheetRows, xlsx: XlsxRuntime): EmployeeRecord[] {
+function parseEmployeeDataRows(rows: RawSheetRows, xlsx: XlsxRuntime): EmployeeRecord[] {
   const headerIndex = createHeaderIndex(rows[0] ?? [])
+  const emailIdx = findHeaderIndexByContains(rows[0] ?? [], 'דוא')
   const employees: EmployeeRecord[] = []
 
   for (const row of rows.slice(1)) {
-    const employeeId = normalizeIdentifier(row[headerIndex.get(canonicalizeHeader("מס'")) ?? -1])
+    const employeeId = normalizeIdentifier(row[headerIndex.get(canonicalizeHeader('מספר עובד')) ?? -1])
     const firstName = normalizeText(row[headerIndex.get(canonicalizeHeader('שם פרטי')) ?? -1])
     const lastName = normalizeText(row[headerIndex.get(canonicalizeHeader('שם משפחה')) ?? -1])
     const name = [firstName, lastName].filter(Boolean).join(' ')
@@ -274,122 +228,39 @@ function parseEmployeeRows(rows: RawSheetRows, xlsx: XlsxRuntime): EmployeeRecor
       continue
     }
 
-    const houseNumber = normalizeText(row[headerIndex.get(canonicalizeHeader("מס' בית")) ?? -1])
     const street = normalizeText(row[headerIndex.get(canonicalizeHeader('כתובת')) ?? -1])
-    const city = normalizeText(row[headerIndex.get(canonicalizeHeader('ישוב')) ?? -1])
-    const stopReason = normalizeText(row[headerIndex.get(canonicalizeHeader('קוד הפסקה')) ?? -1])
+    const houseNumber = normalizeText(row[headerIndex.get(canonicalizeHeader('כתובת - מספר בית')) ?? -1])
+    const city = normalizeText(row[headerIndex.get(canonicalizeHeader('כתובת - ישוב')) ?? -1])
+    const departmentNumber = normalizeText(row[headerIndex.get(canonicalizeHeader('מספר מחלקה')) ?? -1])
 
     employees.push({
       employeeId,
       name,
       firstName,
-      nationalId: normalizeIdentifier(
-        row[headerIndex.get(canonicalizeHeader('מספר זהות/דרכון')) ?? -1],
-      ),
+      nationalId: normalizeIdentifier(row[headerIndex.get(canonicalizeHeader('מספר זהות')) ?? -1]),
       stopDate: parseExcelDate(
-        row[headerIndex.get(canonicalizeHeader('תאריך הפסקה')) ?? -1],
+        row[headerIndex.get(canonicalizeHeader('תאריך הפסקת עבודה')) ?? -1],
         xlsx,
       ),
-      stopReason,
-      birthDate: parseExcelDate(row[headerIndex.get(canonicalizeHeader('תאריך לידה')) ?? -1], xlsx),
-      gender: normalizeText(row[headerIndex.get(canonicalizeHeader('מין')) ?? -1]),
-      startDate: parseExcelDate(
-        row[headerIndex.get(canonicalizeHeader('תחילת עבודה')) ?? -1],
-        xlsx,
-      ),
-      email: normalizeText(row[headerIndex.get(canonicalizeHeader('דוא"ל')) ?? -1]),
-      phone: normalizePhone(row[headerIndex.get(canonicalizeHeader('מספר טלפון')) ?? -1]),
-      department: normalizeText(row[headerIndex.get(canonicalizeHeader('מחלקה')) ?? -1]),
-      city,
-      address: [street, houseNumber, city].filter(Boolean).join(' '),
-      sourceVariant: 'active',
-    })
-  }
-
-  return employees
-}
-
-function parseEmployeeDetailsRows(rows: RawSheetRows, xlsx: XlsxRuntime): EmployeeRecord[] {
-  const headerIndex = createHeaderIndex(rows[0] ?? [])
-  const employees: EmployeeRecord[] = []
-  const emailIdx = findHeaderIndexByContains(rows[0] ?? [], 'דוא')
-
-  for (const row of rows.slice(1)) {
-    const employeeId = normalizeIdentifier(row[headerIndex.get(canonicalizeHeader('עובד')) ?? -1])
-    const fullName = normalizeText(row[headerIndex.get(canonicalizeHeader('שם')) ?? -1])
-    const firstName = extractFirstName(fullName)
-
-    if (!employeeId || !fullName) {
-      continue
-    }
-
-    employees.push({
-      employeeId,
-      name: fullName,
-      firstName,
-      nationalId: normalizeIdentifier(
-        row[headerIndex.get(canonicalizeHeader('מספר תעודת זהות')) ?? -1],
-      ),
-      stopDate: parseExcelDate(
-        row[headerIndex.get(canonicalizeHeader('הפסקת עבודה')) ?? -1],
-        xlsx,
-      ),
-      stopReason: '',
+      stopReason: normalizeText(row[headerIndex.get(canonicalizeHeader('קוד הפסקת עבודה')) ?? -1]),
       birthDate: parseExcelDate(
         row[headerIndex.get(canonicalizeHeader('תאריך לידה')) ?? -1],
         xlsx,
       ),
-      gender: normalizeText(row[headerIndex.get(canonicalizeHeader('מין')) ?? -1]),
+      gender: normalizeText(row[headerIndex.get(canonicalizeHeader('קוד מין')) ?? -1]),
       startDate: parseExcelDate(
-        row[headerIndex.get(canonicalizeHeader('תחילת עבודה')) ?? -1],
+        row[headerIndex.get(canonicalizeHeader('תאריך תחילת עבודה')) ?? -1],
         xlsx,
       ),
       email: emailIdx >= 0 ? normalizeText(row[emailIdx]) : '',
-      phone: '',
-      department: '',
-      city: '',
-      address: '',
-      sourceVariant: 'active',
+      phone: normalizePhone(row[headerIndex.get(canonicalizeHeader('טלפון')) ?? -1]),
+      department: departmentNumber ? `מחלקה ${departmentNumber}` : '',
+      city,
+      address: [street, houseNumber, city].filter(Boolean).join(' '),
     })
   }
 
   return employees
-}
-
-// Michpal "שם" column is "<last> <first>" (last name first). Take the second token as the first name.
-function extractFirstName(fullName: string): string {
-  const parts = fullName.split(/\s+/).filter(Boolean)
-  if (parts.length >= 2) return parts[1]
-  return parts[0] ?? ''
-}
-
-export function mergeEmployeeSources(
-  activeEmployees: EmployeeRecord[],
-  detailEmployees: EmployeeRecord[],
-): MergedEmployeeRecord[] {
-  const detailsByEmployeeId = new Map(detailEmployees.map((employee) => [employee.employeeId, employee]))
-  const detailsByNationalId = new Map(
-    detailEmployees
-      .filter((employee) => employee.nationalId)
-      .map((employee) => [employee.nationalId, employee]),
-  )
-
-  return activeEmployees.map((employee) => {
-    const detailMatch =
-      detailsByEmployeeId.get(employee.employeeId) ??
-      (employee.nationalId ? detailsByNationalId.get(employee.nationalId) : undefined)
-
-    return {
-      ...employee,
-      firstName: employee.firstName || detailMatch?.firstName || '',
-      birthDate: employee.birthDate ?? detailMatch?.birthDate ?? null,
-      gender: employee.gender || detailMatch?.gender || '',
-      email: employee.email || detailMatch?.email || '',
-      startDate: employee.startDate ?? detailMatch?.startDate ?? null,
-      stopDate: employee.stopDate ?? detailMatch?.stopDate ?? null,
-      detailsFound: Boolean(detailMatch),
-    }
-  })
 }
 
 function parseCoverageRows(rows: RawSheetRows): CoverageRecord[] {
@@ -413,17 +284,12 @@ function parseCoverageRows(rows: RawSheetRows): CoverageRecord[] {
         ? taxYearValue
         : Number.parseInt(normalizeText(taxYearValue), 10)
 
-    const fundType1 = normalizeText(row[headerIndex.get(canonicalizeHeader('סוג קופה1')) ?? -1])
-    const fundType2 = normalizeText(row[headerIndex.get(canonicalizeHeader('סוג קופה2')) ?? -1])
-    const fundTypeCombined = [fundType1, fundType2].filter(Boolean).join(' / ') ||
-      normalizeText(row[headerIndex.get(canonicalizeHeader('סוג קופה')) ?? -1])
-
     coverages.push({
       employeeId,
       employeeName,
       nationalId: normalizeIdentifier(row[headerIndex.get(canonicalizeHeader('מספר זהות')) ?? -1]),
       fundName: normalizeText(row[headerIndex.get(canonicalizeHeader('שם הקופה')) ?? -1]),
-      fundType: fundTypeCombined,
+      fundType: normalizeText(row[headerIndex.get(canonicalizeHeader('סוג קופה')) ?? -1]),
       taxYear: Number.isNaN(parsedYear) ? null : parsedYear,
     })
   }
@@ -449,14 +315,12 @@ function getMissingHeaders(
 
 function createHeaderIndex(headerRow: unknown[]): Map<string, number> {
   const index = new Map<string, number>()
-
   for (const [cellIndex, value] of headerRow.entries()) {
     const normalized = canonicalizeHeader(normalizeText(value))
     if (normalized) {
       index.set(normalized, cellIndex)
     }
   }
-
   return index
 }
 
@@ -474,7 +338,6 @@ function normalizeIdentifier(value: unknown): string {
   if (typeof value === 'number') {
     return Number.isInteger(value) ? String(value) : String(value).replace(/\.0+$/, '')
   }
-
   return normalizeText(value)
 }
 
@@ -483,15 +346,12 @@ function normalizePhone(value: unknown): string {
   if (!digitsOnly) {
     return ''
   }
-
   if (digitsOnly.startsWith('972')) {
     return digitsOnly
   }
-
   if (digitsOnly.length === 9) {
     return `0${digitsOnly}`
   }
-
   return digitsOnly
 }
 
@@ -500,7 +360,6 @@ function parseExcelDate(value: unknown, xlsx: XlsxRuntime): Date | null {
     if (Number.isNaN(value.getTime())) {
       return null
     }
-
     return new Date(value.getFullYear(), value.getMonth(), value.getDate())
   }
 
@@ -509,7 +368,6 @@ function parseExcelDate(value: unknown, xlsx: XlsxRuntime): Date | null {
     if (!parsed) {
       return null
     }
-
     return new Date(parsed.y, parsed.m - 1, parsed.d)
   }
 
@@ -552,7 +410,6 @@ async function loadXlsx(): Promise<XlsxRuntime> {
       return runtime
     })
   }
-
   return xlsxPromise
 }
 
@@ -562,7 +419,7 @@ function canonicalizeHeader(value: string): string {
 
 function normalizeText(value: unknown): string {
   return String(value ?? '')
-    .replace(/ /g, ' ')
+    .replace(/ /g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
 }

@@ -1,4 +1,4 @@
-// Smoke test: parse the 3 real input files and report what was detected
+// Smoke test: parse the 2 real input files and report what was detected
 // Run: node scripts/smoke-detect.mjs
 
 import { readFile } from 'node:fs/promises'
@@ -9,14 +9,9 @@ import * as XLSX from 'xlsx'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const dataDir = join(__dirname, '..', 'data')
 
-const files = [
-  'עובדים פעילים מיכפל.xlsx',
-  'פרטי עובד מיכפל.xlsx',
-  'דוח הרכב שכר וגמל מיכפל.xlsx',
-]
+const files = ['נתוני עובד.xlsx', 'דוח הרכב שכר וגמל מיכפל.xlsx']
 
-const ACTIVE = ["מס'", 'מספר זהות/דרכון', 'שם משפחה', 'שם פרטי', 'תאריך לידה', 'תחילת עבודה', 'מספר טלפון']
-const DETAILS = ['עובד', 'שם', 'מספר תעודת זהות', 'תאריך לידה', 'מין', 'תחילת עבודה']
+const EMPLOYEE = ['מספר עובד', 'שם פרטי', 'שם משפחה', 'מספר זהות', 'קוד מין', 'תאריך לידה', 'תאריך תחילת עבודה']
 const GMAL = ['מספר עובד', 'מספר זהות', 'שם הקופה', 'סוג קופה']
 
 function canonicalize(s) {
@@ -43,8 +38,7 @@ for (const fileName of files) {
     const headers = (rows[0] || []).map((h) => String(h ?? '').trim())
 
     const checks = {
-      employee_list: checkSheet(headers, ACTIVE),
-      employee_details: checkSheet(headers, DETAILS),
+      employee_data: checkSheet(headers, EMPLOYEE),
       gmal_report: checkSheet(headers, GMAL),
     }
 
@@ -53,9 +47,8 @@ for (const fileName of files) {
       .map(([k]) => k)
 
     console.log(`  Sheet "${sheetName}" — ${rows.length - 1} rows`)
-    console.log(`    employee_list:    ${checks.employee_list.matched}/${checks.employee_list.total}` + (checks.employee_list.missing.length ? `  missing: ${checks.employee_list.missing.join(', ')}` : ''))
-    console.log(`    employee_details: ${checks.employee_details.matched}/${checks.employee_details.total}` + (checks.employee_details.missing.length ? `  missing: ${checks.employee_details.missing.join(', ')}` : ''))
-    console.log(`    gmal_report:      ${checks.gmal_report.matched}/${checks.gmal_report.total}` + (checks.gmal_report.missing.length ? `  missing: ${checks.gmal_report.missing.join(', ')}` : ''))
+    console.log(`    employee_data: ${checks.employee_data.matched}/${checks.employee_data.total}` + (checks.employee_data.missing.length ? `  missing: ${checks.employee_data.missing.join(', ')}` : ''))
+    console.log(`    gmal_report:   ${checks.gmal_report.matched}/${checks.gmal_report.total}` + (checks.gmal_report.missing.length ? `  missing: ${checks.gmal_report.missing.join(', ')}` : ''))
     console.log(`    => detected: ${winner.length ? winner.join(', ') : 'unknown'}`)
   }
 }

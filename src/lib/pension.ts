@@ -154,7 +154,7 @@ export function compareStatusRows(
     return rightRank - leftRank
   }
 
-  if (left.status === 'באיחור / חסר קופה' && right.status === 'באיחור / חסר קופה') {
+  if (left.status === 'באיחור' && right.status === 'באיחור') {
     return (right.monthsLate ?? 0) - (left.monthsLate ?? 0)
   }
 
@@ -175,7 +175,7 @@ function buildEmployeeStatus(
   const ageEligibilityMonth = getAgeEligibilityMonth(employee.birthDate, genderCode)
   const eligibilityMonth = maxDate(seventhMonth, ageEligibilityMonth)
   const coverage = summarizeCoverage(employee, coverages)
-  const base = baseRow(employee, eligibilityMonth, seventhMonth, ageEligibilityMonth, coverage)
+  const base = baseRow(employee, eligibilityMonth, seventhMonth, ageEligibilityMonth, coverage, reportMonth)
 
   if (coverage.kind !== 'none') {
     return {
@@ -247,7 +247,7 @@ function buildEmployeeStatus(
 
   return {
     ...base,
-    status: 'באיחור / חסר קופה',
+    status: 'באיחור',
     detail: 'אין קופה בדוח גמל למרות שהעובד כבר אמור להיות מבוטח.',
     monthsRemaining: null,
     monthsLate: Math.abs(monthGap),
@@ -260,6 +260,7 @@ function baseRow(
   seventhMonth: Date | null,
   ageEligibilityMonth: Date | null,
   coverage: ReturnType<typeof summarizeCoverage>,
+  reportMonth: Date,
 ): PensionStatusRow {
   return {
     employeeId: employee.employeeId,
@@ -267,6 +268,9 @@ function baseRow(
     firstName: employee.firstName,
     nationalId: employee.nationalId,
     gender: employee.gender,
+    email: employee.email,
+    age: computeAge(employee.birthDate, reportMonth),
+    birthDate: employee.birthDate,
     startDate: employee.startDate,
     eligibilityMonth,
     seventhMonth,
@@ -284,6 +288,16 @@ function baseRow(
     primaryFund: 'ללא קופה',
     hasIdMismatch: coverage.idMismatch,
   }
+}
+
+export function computeAge(birthDate: Date | null, asOf: Date): number | null {
+  if (!birthDate) return null
+  let age = asOf.getFullYear() - birthDate.getFullYear()
+  const m = asOf.getMonth() - birthDate.getMonth()
+  if (m < 0 || (m === 0 && asOf.getDate() < birthDate.getDate())) {
+    age--
+  }
+  return age
 }
 
 function summarizeCoverage(
@@ -454,7 +468,7 @@ function compareDates(left: Date | null, right: Date | null): number {
 
 function urgencyRank(row: PensionStatusRow): number {
   switch (row.status) {
-    case 'באיחור / חסר קופה':
+    case 'באיחור':
       return 5
     case 'זכאי החודש':
       return 4
@@ -473,20 +487,30 @@ function isPensionCoverage(fundName: string, fundType: string): boolean {
   const normalizedFundName = normalizeForMatch(fundName)
   const normalizedFundType = normalizeForMatch(fundType)
 
+  // Training fund alone (קרן השתלמות) is NOT pension coverage.
   if (normalizedFundType.includes('השתלמות') && !normalizedFundType.includes('פנס')) {
     return false
   }
+  // Disability rider (אובדן כושר עבודה) alone is NOT pension.
+  if (normalizedFundType.includes('אובדן')) {
+    return false
+  }
 
+  // Real pension types: לקצבה (annuity), פנסיה (pension), תגמולים (provident contribution),
+  // פיצויים (severance reserve — paired with annuity in Israeli funds).
   return (
     normalizedFundType.includes('לקצבה') ||
     normalizedFundType.includes('פנס') ||
+    normalizedFundType.includes('תגמולים') ||
+    normalizedFundType.includes('פיצויים') ||
     normalizedFundName.includes('פנס')
   )
 }
 
 function isForeignDeposit(fundName: string, fundType: string): boolean {
-  const normalizedFundName = normalizeForMatch(fundName)
-  const normalizedFundType = normalizeForMatch(fundType)
+  // Match both spelling variants: פקדון (defective) and פיקדון (plene).
+  const normalizedFundName = normalizeForMatch(fundName).replace(/פיקדון/g, 'פקדון')
+  const normalizedFundType = normalizeForMatch(fundType).replace(/פיקדון/g, 'פקדון')
   return normalizedFundName.includes('פקדון') || normalizedFundType.includes('פקדון')
 }
 

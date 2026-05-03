@@ -9,8 +9,10 @@ import {
   FileSpreadsheet,
   Filter,
   HelpCircle,
+  Info,
   MessageCircleMore,
   RefreshCcw,
+  Search,
   ShieldAlert,
   Trash2,
   Upload,
@@ -20,7 +22,7 @@ import {
 
 import './App.css'
 import { exportRowsToWorkbook } from './lib/export'
-import { kindLabel, mergeEmployeeSources, parseUploadedFile } from './lib/excel'
+import { kindLabel, parseUploadedFile } from './lib/excel'
 import { buildRenderedMessages, sendSelectedToN8n } from './lib/n8n'
 import { parseSendKey } from './lib/sendKey'
 import {
@@ -29,7 +31,6 @@ import {
   describeTimeline,
   formatDate,
   formatMonth,
-  formatTimestamp,
   getCurrentMonthInputValue,
 } from './lib/pension'
 import type { ParsedUploadedFile, PensionStatus, PensionStatusRow } from './types'
@@ -43,19 +44,19 @@ interface EmployeeActionState {
 interface AppSettings {
   sendKey: string
   templateText: string
+  deadlineOverride: string // ISO YYYY-MM-DD; empty = auto (15th of eligibility month)
 }
 
 interface FileSlots {
   employee: ParsedUploadedFile | null
-  details: ParsedUploadedFile | null
   gmal: ParsedUploadedFile | null
   unknown: ParsedUploadedFile[]
 }
 
-type SlotKey = 'employee' | 'details' | 'gmal'
+type SlotKey = 'employee' | 'gmal'
 
 const EMPLOYEE_STATE_STORAGE_KEY = 'pension-status-employee-state-v2'
-const SETTINGS_STORAGE_KEY = 'pension-status-settings-v2'
+const SETTINGS_STORAGE_KEY = 'pension-status-settings-v3'
 
 const TEMPLATE_PRESET_A = `שלום {{first_name}} 👋
 
@@ -78,17 +79,29 @@ const TEMPLATE_PRESET_B = `שלום {{first_name}},
 
 סוכן הפנסיה של החברה יצור איתך קשר בהקדם כדי לסייע לך בבחירת הקופה והמסלול המיטביים עבורך. עומדת לרשותך הזכות לבחור בכל סוכן או קופה אחרת לפי שיקול דעתך.
 
-במידה ובחרת בקופה באופן עצמאי, עליך להעביר לנו את הפרטים עד ל-15 לחודש (חודש ההפרשה הראשון) לכתובת המייל: {{payroll_email}}.
+במידה ובחרת בקופה באופן עצמאי, עליך להעביר לנו את הפרטים עד ל-{{deadline_date}} לכתובת המייל: {{payroll_email}}.
 
 בהצלחה,
 מחלקת שכר, אורן משי 🩵`
 
 const DEFAULT_TEMPLATE_TEXT = TEMPLATE_PRESET_A
 
+const SLOT_GUIDES: Record<SlotKey, { title: string; subtitle: string; export: string }> = {
+  employee: {
+    title: 'נתוני עובד',
+    subtitle: 'קובץ העובדים ממיכפל (פרטי עובד + סטטוס פעילים)',
+    export: 'ייצוא במיכפל: ייצוא ← דוחות לאקסל ← נתוני עובד ← עד קוד הפסקה עבודה ‎-‎ 0',
+  },
+  gmal: {
+    title: 'דוח גמל',
+    subtitle: 'קובץ הרכב שכר וגמל',
+    export: 'ייצוא במיכפל: ייצוא ← דוחות לאקסל ← הרכב שכר וגמל ← ללא שינוי במסננים',
+  },
+}
+
 function App() {
   const batchInputId = useId()
   const employeeInputId = useId()
-  const detailsInputId = useId()
   const gmalInputId = useId()
   const [reportMonth, setReportMonth] = useState(getCurrentMonthInputValue)
   const [isParsing, setIsParsing] = useState(false)
@@ -97,7 +110,6 @@ function App() {
   const [isSendingWhatsapp, setIsSendingWhatsapp] = useState(false)
   const [fileSlots, setFileSlots] = useState<FileSlots>({
     employee: null,
-    details: null,
     gmal: null,
     unknown: [],
   })
@@ -107,6 +119,7 @@ function App() {
   const [statusFilter, setStatusFilter] = useState<'all' | PensionStatus>('all')
   const [fundFilter, setFundFilter] = useState('all')
   const [sortBy, setSortBy] = useState<'urgency' | 'eligibility' | 'name'>('urgency')
+  const [searchTerm, setSearchTerm] = useState('')
   const [employeeState, setEmployeeState] = useState<Record<string, EmployeeActionState>>(
     loadEmployeeState,
   )
@@ -117,43 +130,37 @@ function App() {
   } | null>(null)
 
   const selectedEmployeeFile = fileSlots.employee
-  const selectedDetailsFile = fileSlots.details
   const selectedGmalFile = fileSlots.gmal
   const analysisIssues = [
-    selectedEmployeeFile ? '' : 'חסר קובץ עובדים פעילים.',
-    selectedDetailsFile ? '' : 'חסר קובץ פרטי עובד.',
+    selectedEmployeeFile ? '' : 'חסר קובץ נתוני עובד.',
     selectedGmalFile ? '' : 'חסר קובץ דוח גמל.',
-  ].filter(Boolean)
-
-  const mergedEmployees = useMemo(
-    () =>
-      selectedEmployeeFile && selectedDetailsFile
-        ? mergeEmployeeSources(selectedEmployeeFile.employees, selectedDetailsFile.employees)
-        : [],
-    [selectedEmployeeFile, selectedDetailsFile],
-  )
-
-  const dataNotices = [
-    selectedDetailsFile && mergedEmployees.some((employee) => !employee.detailsFound)
-      ? 'יש עובדים שלא נמצאו בקובץ פרטי עובד, ולכן חלק מהשדות המשלימים יישארו חסרים עבורם.'
-      : '',
   ].filter(Boolean)
 
   const rows = useMemo(
     () =>
-      selectedEmployeeFile && selectedDetailsFile && selectedGmalFile && analysisIssues.length === 0
-        ? analyzePensionStatus(mergedEmployees, selectedGmalFile.coverages, reportMonth)
+      selectedEmployeeFile && selectedGmalFile && analysisIssues.length === 0
+        ? analyzePensionStatus(
+            selectedEmployeeFile.employees,
+            selectedGmalFile.coverages,
+            reportMonth,
+          )
         : [],
-    [selectedEmployeeFile, selectedDetailsFile, selectedGmalFile, analysisIssues.length, mergedEmployees, reportMonth],
+    [selectedEmployeeFile, selectedGmalFile, analysisIssues.length, reportMonth],
   )
 
   const fundOptions = Array.from(new Set(rows.map((row) => row.primaryFund))).sort((a, b) =>
     a.localeCompare(b, 'he'),
   )
 
+  const normalizedSearch = searchTerm.trim().toLowerCase()
   const filteredRows = rows
     .filter((row) => statusFilter === 'all' || row.status === statusFilter)
     .filter((row) => fundFilter === 'all' || row.primaryFund === fundFilter)
+    .filter((row) => {
+      if (!normalizedSearch) return true
+      const haystack = `${row.name} ${row.firstName} ${row.employeeId} ${row.nationalId} ${row.phone} ${row.email} ${row.department}`.toLowerCase()
+      return haystack.includes(normalizedSearch)
+    })
     .sort((left, right) => compareStatusRows(left, right, sortBy))
 
   const selectedRows = rows.filter((row) => employeeState[row.employeeId]?.selected)
@@ -165,7 +172,7 @@ function App() {
     total: rows.length,
     covered: rows.filter((row) => row.status === 'יש קופה').length,
     dueNow: rows.filter((row) => row.status === 'זכאי החודש').length,
-    late: rows.filter((row) => row.status === 'באיחור / חסר קופה').length,
+    late: rows.filter((row) => row.status === 'באיחור').length,
     missingData: rows.filter((row) => row.status === 'חסר נתונים').length,
     selected: selectedRows.length,
   }
@@ -182,28 +189,18 @@ function App() {
 
   function applyParsedFiles(parsedGroups: ParsedUploadedFile[][], options: { reset?: boolean }) {
     let nextEmployee = options.reset ? null : fileSlots.employee
-    let nextDetails = options.reset ? null : fileSlots.details
     let nextGmal = options.reset ? null : fileSlots.gmal
     const nextUnknown: ParsedUploadedFile[] = options.reset ? [] : [...fileSlots.unknown]
     const nextIssues: string[] = []
 
     for (const parsedFiles of parsedGroups) {
       for (const file of parsedFiles) {
-        if (file.kind === 'employee_list') {
+        if (file.kind === 'employee_data') {
           if (nextEmployee) {
-            nextIssues.push(`זוהה עוד קובץ עובדים פעילים (${file.fileName}). נשמר הקובץ הקודם.`)
+            nextIssues.push(`זוהה עוד קובץ נתוני עובד (${file.fileName}). נשמר הקובץ הקודם.`)
             continue
           }
           nextEmployee = file
-          continue
-        }
-
-        if (file.kind === 'employee_details') {
-          if (nextDetails) {
-            nextIssues.push(`זוהה עוד קובץ פרטי עובד (${file.fileName}). נשמר הקובץ הקודם.`)
-            continue
-          }
-          nextDetails = file
           continue
         }
 
@@ -222,7 +219,6 @@ function App() {
 
     setFileSlots({
       employee: nextEmployee,
-      details: nextDetails,
       gmal: nextGmal,
       unknown: nextUnknown,
     })
@@ -264,17 +260,11 @@ function App() {
 
     try {
       const parsedFiles = await parseUploadedFile(file)
-      const expectedKind =
-        slot === 'employee'
-          ? 'employee_list'
-          : slot === 'details'
-            ? 'employee_details'
-            : 'gmal_report'
+      const expectedKind = slot === 'employee' ? 'employee_data' : 'gmal_report'
 
       const matched = parsedFiles.find((parsed) => parsed.kind === expectedKind)
       if (!matched) {
-        const expectedLabel =
-          slot === 'employee' ? 'עובדים פעילים' : slot === 'details' ? 'פרטי עובד' : 'דוח גמל'
+        const expectedLabel = slot === 'employee' ? 'נתוני עובד' : 'דוח גמל'
         const detected = parsedFiles
           .map((parsed) => (parsed.kind === 'unknown' ? 'לא מזוהה' : kindLabel(parsed.kind)))
           .join(', ')
@@ -284,7 +274,6 @@ function App() {
         return
       }
 
-      // Also pick up any other recognized kinds in the same workbook
       applyParsedFiles([parsedFiles], {})
     } catch (error) {
       setUploadError(
@@ -307,7 +296,6 @@ function App() {
   function clearAllFiles() {
     setFileSlots({
       employee: null,
-      details: null,
       gmal: null,
       unknown: [],
     })
@@ -395,12 +383,12 @@ function App() {
     }
 
     const eligibleRows = selectedRows.filter(
-      (row) => row.phone && (row.status === 'זכאי החודש' || row.status === 'באיחור / חסר קופה'),
+      (row) => row.phone && (row.status === 'זכאי החודש' || row.status === 'באיחור'),
     )
 
     if (eligibleRows.length === 0) {
       setActionMessage(
-        'לא נמצאו עובדים נבחרים מתאימים לשליחה (דרוש סטטוס "זכאי החודש" / "באיחור / חסר קופה" וטלפון).',
+        'לא נמצאו עובדים נבחרים מתאימים לשליחה (דרוש סטטוס "זכאי החודש" / "באיחור" וטלפון).',
       )
       return
     }
@@ -419,6 +407,7 @@ function App() {
         templateText: settings.templateText,
         reportMonth,
         rows: whatsappPreview.rows,
+        deadlineOverride: settings.deadlineOverride || undefined,
       })
       const timestamp = new Date().toISOString()
       updateEmployeeState(
@@ -441,8 +430,8 @@ function App() {
           <span className="eyebrow">בקרת פנסיה לשכר</span>
           <h1>סטטוס הפרשות פנסיה לעובדים</h1>
           <p>
-            העלאת קבצי מקור, זיהוי אוטומטי לפי התוכן, סימון עובדים לעבודה מול הסוכן,
-            ייצוא אקסל מסודר, ושליחת הודעות וואטסאפ אישיות לעובדים דרך n8n.
+            העלאת שני קבצי מקור ממיכפל, זיהוי אוטומטי לפי התוכן, סימון עובדים לעבודה
+            מול הסוכן, ייצוא אקסל מסודר, ושליחת הודעות וואטסאפ אישיות לעובדים דרך n8n.
           </p>
         </div>
 
@@ -472,7 +461,7 @@ function App() {
             <ShieldAlert size={18} />
             <div>
               <strong>{summary.late}</strong>
-              <span>באיחור / חסר קופה</span>
+              <span>באיחור</span>
             </div>
           </article>
           {summary.missingData > 0 && (
@@ -504,9 +493,8 @@ function App() {
             <div className="upload-copy">
               <label htmlFor={batchInputId}>העלאה מהירה</label>
               <p>
-                אפשר להעלות את שלושת הקבצים יחד לזיהוי אוטומטי, או להעלות אותם
-                בנפרד דרך הכרטיסים שמתחת. קובץ עם מספר גיליונות (כמו דוח ניצולים)
-                ייקלט אוטומטית לפי תוכן הגיליונות.
+                אפשר להעלות את שני הקבצים יחד לזיהוי אוטומטי, או להעלות אותם
+                בנפרד דרך הכרטיסים שמתחת.
               </p>
             </div>
 
@@ -533,10 +521,9 @@ function App() {
           </div>
         </section>
 
-        <section className="file-band file-slots">
+        <section className="file-band file-slots-2">
           <FileSlotCard
-            title="עובדים פעילים"
-            subtitle="קובץ העובדים הפעילים ממיכפל"
+            guide={SLOT_GUIDES.employee}
             file={fileSlots.employee}
             inputId={employeeInputId}
             isParsing={isParsing}
@@ -547,20 +534,7 @@ function App() {
             onClear={() => clearSlot('employee')}
           />
           <FileSlotCard
-            title="פרטי עובד"
-            subtitle="קובץ משלים עם מין ודוא״ל"
-            file={fileSlots.details}
-            inputId={detailsInputId}
-            isParsing={isParsing}
-            onChange={(event) => {
-              void handleSingleFileChange('details', event.target.files)
-              event.target.value = ''
-            }}
-            onClear={() => clearSlot('details')}
-          />
-          <FileSlotCard
-            title="דוח גמל"
-            subtitle="קובץ הרכב שכר וגמל"
+            guide={SLOT_GUIDES.gmal}
             file={fileSlots.gmal}
             inputId={gmalInputId}
             isParsing={isParsing}
@@ -616,6 +590,23 @@ function App() {
               </small>
             </label>
 
+            <label>
+              <span>תאריך אחרון לשליחת פרטים (override ל-{`{{deadline_date}}`})</span>
+              <input
+                type="date"
+                value={settings.deadlineOverride}
+                onChange={(event) =>
+                  setSettings((current) => ({
+                    ...current,
+                    deadlineOverride: event.target.value,
+                  }))
+                }
+              />
+              <small>
+                ריק = ברירת מחדל (15 לחודש הזכאות לכל עובד). תאריך = מחליף לכל הנמענים.
+              </small>
+            </label>
+
             <label className="full-width">
               <span>טקסט הטמפלייט</span>
               <div className="template-presets">
@@ -639,6 +630,7 @@ function App() {
                 </button>
               </div>
               <textarea
+                className="template-textarea"
                 rows={12}
                 value={settings.templateText}
                 onChange={(event) =>
@@ -649,9 +641,9 @@ function App() {
                 }
               />
               <small>
-                משתנים זמינים: <code>{'{{first_name}}'}</code>,{' '}
-                <code>{'{{eligibility_month}}'}</code>, <code>{'{{deadline_date}}'}</code>,{' '}
-                <code>{'{{payroll_email}}'}</code>
+                המשתנים נכנסים אוטומטית בשליחה. זמינים:{' '}
+                <code>{'{{first_name}}'}</code>, <code>{'{{eligibility_month}}'}</code>,{' '}
+                <code>{'{{deadline_date}}'}</code>, <code>{'{{payroll_email}}'}</code>
               </small>
             </label>
           </div>
@@ -661,7 +653,6 @@ function App() {
           actionMessage ||
           analysisIssues.length > 0 ||
           uploadIssues.length > 0 ||
-          dataNotices.length > 0 ||
           fileSlots.unknown.length > 0) && (
           <section className="notice-band">
             {uploadError && (
@@ -688,13 +679,6 @@ function App() {
             {uploadIssues.map((issue) => (
               <p className="notice warning" key={issue}>
                 <ShieldAlert size={18} />
-                <span>{issue}</span>
-              </p>
-            ))}
-
-            {dataNotices.map((issue) => (
-              <p className="notice muted" key={issue}>
-                <AlertCircle size={18} />
                 <span>{issue}</span>
               </p>
             ))}
@@ -739,6 +723,16 @@ function App() {
                   </button>
                 ))}
               </div>
+
+              <label className="search-control">
+                <Search size={16} />
+                <input
+                  type="search"
+                  placeholder="חיפוש עובד (שם / ת.ז. / טלפון / מייל)"
+                  value={searchTerm}
+                  onChange={(event) => setSearchTerm(event.target.value)}
+                />
+              </label>
 
               <label className="sort-control">
                 <Filter size={16} />
@@ -834,7 +828,7 @@ function App() {
               <CalendarClock size={24} />
               <p>
                 {rows.length === 0
-                  ? 'הטבלה תופיע אחרי שיועלו עובדים פעילים, פרטי עובד ודוח גמל.'
+                  ? 'הטבלה תופיע אחרי שיועלו נתוני עובד ודוח גמל.'
                   : 'אין שורות להצגה תחת הסינון הנוכחי.'}
               </p>
             </div>
@@ -846,6 +840,8 @@ function App() {
                     <th>בחירה</th>
                     <th>מספר עובד</th>
                     <th>שם</th>
+                    <th>גיל</th>
+                    <th>תאריך לידה</th>
                     <th>טלפון</th>
                     <th>מחלקה</th>
                     <th>קופה</th>
@@ -853,8 +849,6 @@ function App() {
                     <th>חודש תחילת הפרשה</th>
                     <th>חודשים שנותרו / איחור</th>
                     <th>סטטוס</th>
-                    <th>למי ירד לסוכן</th>
-                    <th>למי נשלחה הודעה</th>
                     <th>פירוט</th>
                   </tr>
                 </thead>
@@ -883,6 +877,7 @@ function App() {
         <WhatsappPreviewModal
           rows={whatsappPreview.rows}
           template={settings.templateText}
+          deadlineOverride={settings.deadlineOverride || undefined}
           onCancel={() => setWhatsappPreview(null)}
           onConfirm={() => {
             void confirmWhatsappSend()
@@ -895,16 +890,14 @@ function App() {
 }
 
 function FileSlotCard({
-  title,
-  subtitle,
+  guide,
   file,
   inputId,
   isParsing,
   onChange,
   onClear,
 }: {
-  title: string
-  subtitle: string
+  guide: { title: string; subtitle: string; export: string }
   file: ParsedUploadedFile | null
   inputId: string
   isParsing: boolean
@@ -915,22 +908,25 @@ function FileSlotCard({
     <article className={`file-card slot-card ${file ? 'valid' : ''}`}>
       <div className="file-card-top">
         <div>
-          <span className="file-chip">{title}</span>
+          <span className="file-chip">{guide.title}</span>
           <h2>
             {file
               ? file.sheetName
                 ? `${file.fileName} → ${file.sheetName}`
                 : file.fileName
-              : subtitle}
+              : guide.subtitle}
           </h2>
         </div>
         {file && <strong>{file.rowCount} שורות</strong>}
       </div>
 
       <p className="file-meta">
-        {file
-          ? `זוהה כ-${kindLabel(file.kind as 'employee_list' | 'employee_details' | 'gmal_report')}`
-          : subtitle}
+        {file ? `זוהה כ-${kindLabel(file.kind as 'employee_data' | 'gmal_report')}` : guide.subtitle}
+      </p>
+
+      <p className="export-hint">
+        <Info size={14} />
+        <span>{guide.export}</span>
       </p>
 
       <div className="slot-actions">
@@ -959,6 +955,7 @@ function EmployeeRow({
   actionState: EmployeeActionState
   onToggleSelected: () => void
 }) {
+  void actionState // keep for potential future per-row badges
   return (
     <tr className={`status-row ${statusClassName(row.status)}`}>
       <td>
@@ -971,6 +968,8 @@ function EmployeeRow({
           <span>{row.nationalId || 'ללא ת.ז.'}</span>
         </div>
       </td>
+      <td className="numeric-cell">{row.age ?? '—'}</td>
+      <td>{formatDate(row.birthDate)}</td>
       <td className="numeric-cell">{row.phone || '—'}</td>
       <td>{row.department || '—'}</td>
       <td>
@@ -982,8 +981,6 @@ function EmployeeRow({
       <td>
         <span className={`status-pill ${statusClassName(row.status)}`}>{row.status}</span>
       </td>
-      <td>{actionState.exportedToAgentAt ? formatTimestamp(actionState.exportedToAgentAt) : '—'}</td>
-      <td>{actionState.whatsappSentAt ? formatTimestamp(actionState.whatsappSentAt) : '—'}</td>
       <td>{row.detail}</td>
     </tr>
   )
@@ -992,17 +989,19 @@ function EmployeeRow({
 function WhatsappPreviewModal({
   rows,
   template,
+  deadlineOverride,
   onCancel,
   onConfirm,
   isSending,
 }: {
   rows: PensionStatusRow[]
   template: string
+  deadlineOverride: string | undefined
   onCancel: () => void
   onConfirm: () => void
   isSending: boolean
 }) {
-  const messages = buildRenderedMessages(rows, template)
+  const messages = buildRenderedMessages(rows, template, deadlineOverride)
   const first = messages[0]
 
   return (
@@ -1071,7 +1070,7 @@ function statusClassName(status: PensionStatus): string {
       return 'pending'
     case 'זכאי החודש':
       return 'due'
-    case 'באיחור / חסר קופה':
+    case 'באיחור':
       return 'late'
     case 'חסר נתונים':
       return 'unknown-data'
@@ -1087,12 +1086,16 @@ function parseMonthValue(value: string): Date {
   return Number.isNaN(year) || Number.isNaN(month) ? new Date() : new Date(year, month - 1, 1)
 }
 
-function buildAgentExportRow(row: PensionStatusRow, actionState: EmployeeActionState) {
+function buildAgentExportRow(row: PensionStatusRow, _actionState: EmployeeActionState | undefined) {
+  void _actionState
   return {
     'מספר עובד': row.employeeId,
     שם: row.name,
     'מספר זהות': row.nationalId,
     טלפון: row.phone,
+    'דוא"ל': row.email,
+    גיל: row.age ?? '',
+    'תאריך לידה': formatDate(row.birthDate),
     מחלקה: row.department,
     עיר: row.city,
     כתובת: row.address,
@@ -1102,22 +1105,20 @@ function buildAgentExportRow(row: PensionStatusRow, actionState: EmployeeActionS
     'חודש תחילת הפרשה': formatMonth(row.eligibilityMonth),
     'חודשים שנותרו / איחור': describeTimeline(row),
     פירוט: row.detail,
-    'נשלח לסוכן קודם': actionState.exportedToAgentAt
-      ? formatTimestamp(actionState.exportedToAgentAt)
-      : '',
-    'נשלחה הודעה קודם': actionState.whatsappSentAt
-      ? formatTimestamp(actionState.whatsappSentAt)
-      : '',
   }
 }
 
-function buildFullExportRow(row: PensionStatusRow, actionState: EmployeeActionState) {
+function buildFullExportRow(row: PensionStatusRow, _actionState: EmployeeActionState | undefined) {
+  void _actionState
   return {
     'מספר עובד': row.employeeId,
     שם: row.name,
     'מספר זהות': row.nationalId,
     מין: row.gender || 'לא זמין',
+    גיל: row.age ?? '',
+    'תאריך לידה': formatDate(row.birthDate),
     טלפון: row.phone,
+    'דוא"ל': row.email,
     מחלקה: row.department,
     עיר: row.city,
     כתובת: row.address,
@@ -1132,13 +1133,6 @@ function buildFullExportRow(row: PensionStatusRow, actionState: EmployeeActionSt
     'חודשי איחור': row.monthsLate ?? '',
     פירוט: row.detail,
     'אי התאמה בתעודת זהות': row.hasIdMismatch ? 'כן' : 'לא',
-    'נבחר לפעולה': actionState.selected ? 'כן' : 'לא',
-    'ירד לסוכן': actionState.exportedToAgentAt
-      ? formatTimestamp(actionState.exportedToAgentAt)
-      : '',
-    'נשלחה הודעת פנסיה': actionState.whatsappSentAt
-      ? formatTimestamp(actionState.whatsappSentAt)
-      : '',
   }
 }
 
@@ -1155,15 +1149,16 @@ function loadSettings(): AppSettings {
   try {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY)
     if (!raw) {
-      return { sendKey: '', templateText: DEFAULT_TEMPLATE_TEXT }
+      return { sendKey: '', templateText: DEFAULT_TEMPLATE_TEXT, deadlineOverride: '' }
     }
     const parsed = JSON.parse(raw) as Partial<AppSettings>
     return {
       sendKey: parsed.sendKey ?? '',
       templateText: parsed.templateText ?? DEFAULT_TEMPLATE_TEXT,
+      deadlineOverride: parsed.deadlineOverride ?? '',
     }
   } catch {
-    return { sendKey: '', templateText: DEFAULT_TEMPLATE_TEXT }
+    return { sendKey: '', templateText: DEFAULT_TEMPLATE_TEXT, deadlineOverride: '' }
   }
 }
 
@@ -1171,7 +1166,7 @@ const STATUS_OPTIONS: PensionStatus[] = [
   'יש קופה',
   'טרם זכאי',
   'זכאי החודש',
-  'באיחור / חסר קופה',
+  'באיחור',
   'חסר נתונים',
 ]
 

@@ -1,10 +1,10 @@
-export type UploadedFileKind = 'employee_list' | 'employee_details' | 'gmal_report'
+export type UploadedFileKind = 'employee_data' | 'gmal_report'
 
 export type PensionStatus =
   | 'יש קופה'
   | 'טרם זכאי'
   | 'זכאי החודש'
-  | 'באיחור / חסר קופה'
+  | 'באיחור'
   | 'חסר נתונים'
 
 export type GenderCode = 'male' | 'female' | null
@@ -24,7 +24,6 @@ export interface EmployeeRecord {
   department: string
   city: string
   address: string
-  sourceVariant: 'active'
 }
 
 export interface CoverageRecord {
@@ -50,16 +49,15 @@ export interface ParsedUploadedFile {
   coverages: CoverageRecord[]
 }
 
-export interface MergedEmployeeRecord extends EmployeeRecord {
-  detailsFound: boolean
-}
-
 export interface PensionStatusRow {
   employeeId: string
   name: string
   firstName: string
   nationalId: string
   gender: string
+  email: string
+  age: number | null
+  birthDate: Date | null
   startDate: Date | null
   eligibilityMonth: Date | null
   seventhMonth: Date | null

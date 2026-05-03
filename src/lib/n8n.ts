@@ -13,6 +13,7 @@ export interface WhatsAppSendOptions {
   reportMonth: string
   rows: PensionStatusRow[]
   templateText: string
+  deadlineOverride?: string // ISO date "YYYY-MM-DD"; if empty, auto = 15th of eligibility month
 }
 
 export interface RenderedMessage {
@@ -25,10 +26,14 @@ export interface RenderedMessage {
   text: string
 }
 
-export function renderTemplate(template: string, row: PensionStatusRow): string {
+export function renderTemplate(
+  template: string,
+  row: PensionStatusRow,
+  deadlineOverride?: string,
+): string {
   const firstName = row.firstName || row.name.split(' ')[0] || ''
   const eligibilityMonth = row.eligibilityMonth ? formatMonth(row.eligibilityMonth) : 'הקרוב'
-  const deadlineDate = formatDeadlineDate(row.eligibilityMonth)
+  const deadlineDate = formatDeadlineDate(row.eligibilityMonth, deadlineOverride)
 
   return template
     .replace(/\{\{\s*first_name\s*\}\}/g, firstName)
@@ -37,8 +42,18 @@ export function renderTemplate(template: string, row: PensionStatusRow): string 
     .replace(/\{\{\s*deadline_date\s*\}\}/g, deadlineDate)
 }
 
-// 15th of the eligibility month — "המועד האחרון להעברת פרטי קופה"
-function formatDeadlineDate(eligibilityMonth: Date | null): string {
+// Default deadline = 15th of the eligibility month, unless override is provided.
+function formatDeadlineDate(eligibilityMonth: Date | null, override?: string): string {
+  if (override) {
+    const parsed = parseIsoDate(override)
+    if (parsed) {
+      return new Intl.DateTimeFormat('he-IL', {
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+      }).format(parsed)
+    }
+  }
   if (!eligibilityMonth) return 'הקרוב'
   const deadline = new Date(eligibilityMonth.getFullYear(), eligibilityMonth.getMonth(), 15)
   return new Intl.DateTimeFormat('he-IL', {
@@ -48,9 +63,17 @@ function formatDeadlineDate(eligibilityMonth: Date | null): string {
   }).format(deadline)
 }
 
+function parseIsoDate(value: string): Date | null {
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!m) return null
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
 export function buildRenderedMessages(
   rows: PensionStatusRow[],
   template: string,
+  deadlineOverride?: string,
 ): RenderedMessage[] {
   return rows.map((row) => ({
     employeeId: row.employeeId,
@@ -59,7 +82,7 @@ export function buildRenderedMessages(
     phone: row.phone,
     nationalId: row.nationalId,
     eligibilityMonth: row.eligibilityMonth ? formatMonth(row.eligibilityMonth) : '',
-    text: renderTemplate(template, row),
+    text: renderTemplate(template, row, deadlineOverride),
   }))
 }
 
@@ -70,7 +93,7 @@ export async function sendSelectedToN8n(options: WhatsAppSendOptions): Promise<v
   }
 
   const url = buildWebhookUrl(DEFAULT_N8N_BASE_URL, parsedKey.urlPath)
-  const messages = buildRenderedMessages(options.rows, options.templateText)
+  const messages = buildRenderedMessages(options.rows, options.templateText, options.deadlineOverride)
 
   const response = await fetch(url, {
     method: 'POST',
