@@ -79,8 +79,14 @@
 | שדה | ערך |
 |---|---|
 | Template Name | `pension_existing_fund` |
-| Category | `UTILITY` |
+| Category | `MARKETING` (Meta סיווג מחדש) |
 | Language | Hebrew (`he`) |
+
+> **השלכות של קטגוריה MARKETING:**
+> - דורש opt-in מהעובד לפני שליחת הודעות שיווק (Meta מחמירה בזה)
+> - עלות גבוהה יותר ל-conversation (תלוי במחירון WhatsApp Business)
+> - עלול להיכלל במגבלות frequency cap של Meta (24h cooldown בין הודעות שיווק)
+> - לא חוסם שליחה — רק מצריך מודעות אופרטיבית
 
 **Body (להזין כשמגיש לאישור):**
 
