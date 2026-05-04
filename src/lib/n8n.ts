@@ -6,7 +6,9 @@ const DEFAULT_N8N_BASE_URL =
   (import.meta as unknown as { env?: { VITE_N8N_BASE_URL?: string } }).env?.VITE_N8N_BASE_URL ??
   'https://orenmeshi.app.n8n.cloud/webhook'
 
-const PAYROLL_EMAIL = 'payroll@orenmeshi.com'
+// The approved Meta/Glassix templates show the email as a Markdown link.
+// We must render it byte-for-byte the same way for the template match.
+const PAYROLL_EMAIL = '[payroll@orenmeshi.com](mailto:payroll@orenmeshi.com)'
 
 export interface WhatsAppSendOptions {
   sendKey: string
@@ -134,4 +136,4 @@ export async function sendSelectedToN8n(options: WhatsAppSendOptions): Promise<v
   }
 }
 
-export const PAYROLL_EMAIL_ADDRESS = PAYROLL_EMAIL
+export const PAYROLL_EMAIL_RENDERED = PAYROLL_EMAIL
