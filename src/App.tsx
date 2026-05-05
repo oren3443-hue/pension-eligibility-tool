@@ -772,9 +772,23 @@ function App() {
                       <AlertCircle size={16} /> שגיאות: {sendResult.failed}
                     </span>
                   )}
+                  {sendResult.warnings?.length > 0 && (
+                    <span className="send-stat warning">
+                      <ShieldAlert size={16} /> אזהרות: {sendResult.warnings.length}
+                    </span>
+                  )}
                   <span className="send-stat total">סה"כ: {sendResult.total}</span>
                   <button className="ghost-button small" onClick={() => setSendResult(null)}>סגור</button>
                 </div>
+                {sendResult.warnings?.length > 0 && (
+                  <ul className="send-warnings-list">
+                    {sendResult.warnings.map((w, i) => (
+                      <li key={i}>
+                        <strong>{w.name || w.to_phone}</strong> — {w.warning}
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 {sendResult.errors.length > 0 && (
                   <ul className="send-errors-list">
                     {sendResult.errors.map((err, i) => (
