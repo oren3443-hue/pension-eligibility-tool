@@ -8,6 +8,19 @@ const DEFAULT_N8N_BASE_URL =
 
 const PAYROLL_EMAIL = 'payroll@orenmeshi.com'
 
+export interface SendResult {
+  sent: number
+  failed: number
+  total: number
+  errors: Array<{
+    employeeId: string | null
+    name: string | null
+    to_phone: string | null
+    error: string
+    statusCode?: number | null
+  }>
+}
+
 export interface WhatsAppSendOptions {
   sendKey: string
   reportMonth: string
@@ -186,7 +199,7 @@ function buildSampleRow(phone: string, reportMonth: string): PensionStatusRow {
   }
 }
 
-export async function sendSelectedToN8n(options: WhatsAppSendOptions): Promise<void> {
+export async function sendSelectedToN8n(options: WhatsAppSendOptions): Promise<SendResult> {
   const parsedKey = parseSendKey(options.sendKey)
   if (!parsedKey) {
     throw new Error('מפתח השליחה לא תקין. הפורמט הנדרש: name=path=secret')
@@ -222,14 +235,15 @@ export async function sendSelectedToN8n(options: WhatsAppSendOptions): Promise<v
     let message = `קריאת webhook נכשלה עם סטטוס ${response.status}.`
     try {
       const data = (await response.json()) as { message?: string }
-      if (data.message) {
-        message = data.message
-      }
+      if (data.message) message = data.message
     } catch {
       // keep generic message
     }
     throw new Error(message)
   }
+
+  const result = (await response.json()) as SendResult
+  return result
 }
 
 export const PAYROLL_EMAIL_RENDERED = PAYROLL_EMAIL
