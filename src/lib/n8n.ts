@@ -12,6 +12,12 @@ export interface SendResult {
   sent: number
   failed: number
   total: number
+  warnings: Array<{
+    employeeId: string | null
+    name: string | null
+    to_phone: string | null
+    warning: string
+  }>
   errors: Array<{
     employeeId: string | null
     name: string | null
