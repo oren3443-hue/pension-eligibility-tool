@@ -23,7 +23,7 @@ import {
 import './App.css'
 import { exportRowsToWorkbook } from './lib/export'
 import { kindLabel, parseUploadedFile } from './lib/excel'
-import { buildRenderedMessages, sendSelectedToN8n, sendTestMessages } from './lib/n8n'
+import { buildRenderedMessages, sendSelectedToN8n, sendTestMessages, type SendResult } from './lib/n8n'
 import { parseSendKey } from './lib/sendKey'
 import {
   analyzePensionStatus,
@@ -134,6 +134,7 @@ function App() {
   )
   const [settings, setSettings] = useState<AppSettings>(loadSettings)
   const [showSendKey, setShowSendKey] = useState(false)
+  const [sendResult, setSendResult] = useState<SendResult | null>(null)
   const [whatsappPreview, setWhatsappPreview] = useState<{
     rows: PensionStatusRow[]
   } | null>(null)
@@ -440,7 +441,7 @@ function App() {
     setActionMessage('')
 
     try {
-      await sendSelectedToN8n({
+      const result = await sendSelectedToN8n({
         sendKey: settings.sendKey,
         templateText: settings.templateText,
         reportMonth,
@@ -452,7 +453,7 @@ function App() {
         whatsappPreview.rows.map((row) => row.employeeId),
         (current) => ({ ...current, whatsappSentAt: timestamp }),
       )
-      setActionMessage(`נשלחו ${whatsappPreview.rows.length} הודעות פנסיה ל-n8n.`)
+      setSendResult(result)
       setWhatsappPreview(null)
     } catch (error) {
       setActionMessage(error instanceof Error ? error.message : 'שליחת webhook נכשלה.')
@@ -741,6 +742,7 @@ function App() {
 
         {(uploadError ||
           actionMessage ||
+          sendResult ||
           analysisIssues.length > 0 ||
           uploadIssues.length > 0 ||
           fileSlots.unknown.length > 0) && (
@@ -757,6 +759,32 @@ function App() {
                 <CheckCircle2 size={18} />
                 <span>{actionMessage}</span>
               </p>
+            )}
+
+            {sendResult && (
+              <div className="send-result">
+                <div className="send-result-summary">
+                  <span className="send-stat sent">
+                    <CheckCircle2 size={16} /> נשלחו: {sendResult.sent}
+                  </span>
+                  {sendResult.failed > 0 && (
+                    <span className="send-stat failed">
+                      <AlertCircle size={16} /> שגיאות: {sendResult.failed}
+                    </span>
+                  )}
+                  <span className="send-stat total">סה"כ: {sendResult.total}</span>
+                  <button className="ghost-button small" onClick={() => setSendResult(null)}>סגור</button>
+                </div>
+                {sendResult.errors.length > 0 && (
+                  <ul className="send-errors-list">
+                    {sendResult.errors.map((err, i) => (
+                      <li key={i}>
+                        <strong>{err.name || err.to_phone}</strong> — {err.error}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             )}
 
             {analysisIssues.map((issue) => (
