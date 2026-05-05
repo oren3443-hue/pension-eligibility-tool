@@ -6,7 +6,7 @@ const DEFAULT_N8N_BASE_URL =
   (import.meta as unknown as { env?: { VITE_N8N_BASE_URL?: string } }).env?.VITE_N8N_BASE_URL ??
   'https://orenmeshi.app.n8n.cloud/webhook'
 
-const PAYROLL_EMAIL = '[payroll@orenmeshi.com](mailto:payroll@orenmeshi.com)'
+const PAYROLL_EMAIL = 'payroll@orenmeshi.com'
 
 export interface WhatsAppSendOptions {
   sendKey: string
