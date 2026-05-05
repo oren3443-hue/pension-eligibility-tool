@@ -6,7 +6,7 @@ const DEFAULT_N8N_BASE_URL =
   (import.meta as unknown as { env?: { VITE_N8N_BASE_URL?: string } }).env?.VITE_N8N_BASE_URL ??
   'https://orenmeshi.app.n8n.cloud/webhook'
 
-const PAYROLL_EMAIL = 'payroll@orenmeshi.com'
+const PAYROLL_EMAIL = '[payroll@orenmeshi.com](mailto:payroll@orenmeshi.com)'
 
 export interface WhatsAppSendOptions {
   sendKey: string
@@ -112,7 +112,6 @@ export async function sendTestMessages(options: TestSendOptions): Promise<void> 
 
   const employees = options.templates.map((tpl) => {
     const rendered = renderTemplate(tpl.text, sampleRow, options.deadlineOverride)
-    const text = `🧪 בדיקה — נוסח ${tpl.label}\n\n${rendered}`
     return {
       employeeId: `test-${tpl.label}`,
       name: 'בדיקת טמפלייט',
@@ -120,8 +119,8 @@ export async function sendTestMessages(options: TestSendOptions): Promise<void> 
       nationalId: sampleRow.nationalId,
       phone,
       eligibilityMonth: sampleRow.eligibilityMonth ? formatMonth(sampleRow.eligibilityMonth) : '',
-      text,
-      message: text,
+      text: rendered,
+      message: rendered,
     }
   })
 
