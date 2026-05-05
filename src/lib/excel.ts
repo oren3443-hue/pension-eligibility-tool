@@ -57,7 +57,6 @@ export async function parseUploadedFile(file: File): Promise<ParsedUploadedFile[
   const arrayBuffer = await file.arrayBuffer()
   const workbook = xlsx.read(arrayBuffer, {
     type: 'array',
-    cellDates: true,
     dense: true,
   })
 

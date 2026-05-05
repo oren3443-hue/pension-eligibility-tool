@@ -23,7 +23,7 @@ import {
 import './App.css'
 import { exportRowsToWorkbook } from './lib/export'
 import { kindLabel, parseUploadedFile } from './lib/excel'
-import { buildRenderedMessages, sendSelectedToN8n } from './lib/n8n'
+import { buildRenderedMessages, sendSelectedToN8n, sendTestMessages } from './lib/n8n'
 import { parseSendKey } from './lib/sendKey'
 import {
   analyzePensionStatus,
@@ -45,6 +45,7 @@ interface AppSettings {
   sendKey: string
   templateText: string
   deadlineOverride: string // ISO YYYY-MM-DD; empty = auto (15th of eligibility month)
+  testPhone: string
 }
 
 interface FileSlots {
@@ -117,6 +118,7 @@ function App() {
   const [isExportingAgent, setIsExportingAgent] = useState(false)
   const [isExportingFull, setIsExportingFull] = useState(false)
   const [isSendingWhatsapp, setIsSendingWhatsapp] = useState(false)
+  const [isSendingTest, setIsSendingTest] = useState(false)
   const [fileSlots, setFileSlots] = useState<FileSlots>({
     employee: null,
     gmal: null,
@@ -401,6 +403,39 @@ function App() {
     setWhatsappPreview({ rows: eligibleRows })
   }
 
+  async function handleSendTest() {
+    if (!sendKeyValid) {
+      setActionMessage('צריך להזין מפתח שליחה תקין (פורמט name=path=secret) לפני שליחה.')
+      return
+    }
+    const phone = settings.testPhone.trim()
+    if (!phone) {
+      setActionMessage('צריך להזין מספר טלפון לבדיקה.')
+      return
+    }
+
+    setIsSendingTest(true)
+    setActionMessage('')
+    try {
+      await sendTestMessages({
+        sendKey: settings.sendKey,
+        reportMonth,
+        testPhone: phone,
+        templates: [
+          { label: 'א', text: TEMPLATE_PRESET_A },
+          { label: 'ב', text: TEMPLATE_PRESET_B },
+          { label: 'ג', text: TEMPLATE_PRESET_C },
+        ],
+        deadlineOverride: settings.deadlineOverride || undefined,
+      })
+      setActionMessage(`נשלחו 3 הודעות בדיקה ל-${phone}.`)
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : 'שליחת בדיקה נכשלה.')
+    } finally {
+      setIsSendingTest(false)
+    }
+  }
+
   async function confirmWhatsappSend() {
     if (!whatsappPreview) return
     setIsSendingWhatsapp(true)
@@ -662,6 +697,45 @@ function App() {
                 <code>{'{{first_name}}'}</code>, <code>{'{{eligibility_month}}'}</code>,{' '}
                 <code>{'{{deadline_date}}'}</code>, <code>{'{{payroll_email}}'}</code>,{' '}
                 <code>{'{{primary_fund}}'}</code>
+              </small>
+            </label>
+
+            <label className="full-width">
+              <span>בדיקת תבניות — שלח את 3 הנוסחים לטלפון</span>
+              <div className="template-presets">
+                <input
+                  type="tel"
+                  inputMode="tel"
+                  placeholder="05XXXXXXXX"
+                  value={settings.testPhone}
+                  onChange={(event) =>
+                    setSettings((current) => ({
+                      ...current,
+                      testPhone: event.target.value,
+                    }))
+                  }
+                  style={{ flex: 1, minWidth: '12rem' }}
+                />
+                <button
+                  type="button"
+                  className="upload-button"
+                  onClick={() => {
+                    void handleSendTest()
+                  }}
+                  disabled={isSendingTest || !sendKeyValid || !settings.testPhone.trim()}
+                  title={
+                    sendKeyValid
+                      ? 'שליחת 3 ההודעות (א/ב/ג) על נתוני דמה למספר הבדיקה'
+                      : 'יש להזין מפתח שליחה תקין'
+                  }
+                >
+                  <MessageCircleMore size={16} />
+                  <span>{isSendingTest ? 'שולח...' : 'שלח 3 נוסחים אלי'}</span>
+                </button>
+              </div>
+              <small>
+                שולח את נוסח א, ב ו-ג אל הטלפון הזה עם נתוני דמה (אורן, חודש הדיווח הנוכחי, קופה
+                "כלל פנסיה"). לא משפיע על העובדים האמיתיים ולא נספר ב-"נשלח".
               </small>
             </label>
           </div>
@@ -1164,19 +1238,24 @@ function loadEmployeeState(): Record<string, EmployeeActionState> {
 }
 
 function loadSettings(): AppSettings {
+  const fallback: AppSettings = {
+    sendKey: '',
+    templateText: DEFAULT_TEMPLATE_TEXT,
+    deadlineOverride: '',
+    testPhone: '',
+  }
   try {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY)
-    if (!raw) {
-      return { sendKey: '', templateText: DEFAULT_TEMPLATE_TEXT, deadlineOverride: '' }
-    }
+    if (!raw) return fallback
     const parsed = JSON.parse(raw) as Partial<AppSettings>
     return {
       sendKey: parsed.sendKey ?? '',
       templateText: parsed.templateText ?? DEFAULT_TEMPLATE_TEXT,
       deadlineOverride: parsed.deadlineOverride ?? '',
+      testPhone: parsed.testPhone ?? '',
     }
   } catch {
-    return { sendKey: '', templateText: DEFAULT_TEMPLATE_TEXT, deadlineOverride: '' }
+    return fallback
   }
 }
 

@@ -88,6 +88,105 @@ export function buildRenderedMessages(
   }))
 }
 
+export interface TestSendOptions {
+  sendKey: string
+  reportMonth: string
+  testPhone: string
+  templates: { label: string; text: string }[]
+  deadlineOverride?: string
+}
+
+export async function sendTestMessages(options: TestSendOptions): Promise<void> {
+  const parsedKey = parseSendKey(options.sendKey)
+  if (!parsedKey) {
+    throw new Error('מפתח השליחה לא תקין. הפורמט הנדרש: name=path=secret')
+  }
+
+  const phone = options.testPhone.trim()
+  if (!phone) {
+    throw new Error('צריך להזין מספר טלפון לבדיקה.')
+  }
+
+  const url = buildWebhookUrl(DEFAULT_N8N_BASE_URL, parsedKey.urlPath)
+  const sampleRow = buildSampleRow(phone, options.reportMonth)
+
+  const employees = options.templates.map((tpl) => {
+    const rendered = renderTemplate(tpl.text, sampleRow, options.deadlineOverride)
+    const text = `🧪 בדיקה — נוסח ${tpl.label}\n\n${rendered}`
+    return {
+      employeeId: `test-${tpl.label}`,
+      name: 'בדיקת טמפלייט',
+      firstName: sampleRow.firstName,
+      nationalId: sampleRow.nationalId,
+      phone,
+      eligibilityMonth: sampleRow.eligibilityMonth ? formatMonth(sampleRow.eligibilityMonth) : '',
+      text,
+      message: text,
+    }
+  })
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Send-Key': parsedKey.secret,
+    },
+    body: JSON.stringify({
+      source: parsedKey.name,
+      reportMonth: options.reportMonth,
+      sentAt: new Date().toISOString(),
+      isTest: true,
+      employees,
+    }),
+  })
+
+  if (!response.ok) {
+    let message = `קריאת webhook נכשלה עם סטטוס ${response.status}.`
+    try {
+      const data = (await response.json()) as { message?: string }
+      if (data.message) {
+        message = data.message
+      }
+    } catch {
+      // keep generic message
+    }
+    throw new Error(message)
+  }
+}
+
+function buildSampleRow(phone: string, reportMonth: string): PensionStatusRow {
+  const monthMatch = reportMonth.match(/^(\d{4})-(\d{2})$/)
+  const eligibilityMonth = monthMatch
+    ? new Date(Number(monthMatch[1]), Number(monthMatch[2]) - 1, 1)
+    : new Date()
+  return {
+    employeeId: 'test-sample',
+    name: 'בדיקת טמפלייט',
+    firstName: 'אורן',
+    nationalId: '000000000',
+    gender: '',
+    email: '',
+    age: 30,
+    birthDate: null,
+    startDate: null,
+    eligibilityMonth,
+    seventhMonth: null,
+    ageEligibilityMonth: null,
+    status: 'זכאי החודש',
+    detail: '',
+    monthsRemaining: 0,
+    monthsLate: null,
+    coverageKind: 'none',
+    phone,
+    department: '',
+    city: '',
+    address: '',
+    fundLabels: [],
+    primaryFund: 'כלל פנסיה',
+    hasIdMismatch: false,
+  }
+}
+
 export async function sendSelectedToN8n(options: WhatsAppSendOptions): Promise<void> {
   const parsedKey = parseSendKey(options.sendKey)
   if (!parsedKey) {
