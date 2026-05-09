@@ -37,6 +37,45 @@ const GMAL_REQUIRED_HEADERS: readonly string[] = [
   'סוג קופה',
 ] as const
 
+// Maps `מספר מחלקה` from the Michpal export to human-readable names.
+// Source: רשימת מחלקות PDF from Michpal (חברה 010 מאפיית אורן משי).
+// Prefix rule: `מ.` → "מפעל:", `ס.` → "סניפים:". Dept 29 stays verbatim.
+const DEPARTMENT_NAMES: Readonly<Record<number, string>> = {
+  2: 'מפעל: מנגנון מפעל',
+  3: "סניפים: ח'",
+  4: 'סניפים: נאות',
+  5: 'מפעל: מטה חברה',
+  6: 'סניפים: ברנע',
+  7: 'סניפים: באר שבע',
+  9: 'סניפים: אגמים',
+  10: 'סניפים: מטה סניפים',
+  11: 'סניפים: מרינה',
+  12: 'סניפים: ראשון לציון',
+  13: 'מפעל: עקיף אחזקה',
+  14: 'מפעל: עקיף נהגים',
+  16: 'מפעל: מחסנים',
+  17: 'סניפים: כיכר היונים',
+  19: 'מפעל: משק ובקרה',
+  20: 'סניפים: יבנה',
+  22: 'מפעל: קו פרנה',
+  23: 'מפעל: קו פיתה',
+  24: 'מפעל: קו שולחן',
+  25: 'מפעל: קו בגט',
+  26: 'מפעל: קו אריזה שוק',
+  27: 'מפעל: אריזה סניפים',
+  28: 'מפעל: ייצור קיטים',
+  29: 'QUEEN CANS',
+  30: 'סניפים: בית קולינריה',
+  31: 'סניפים: כרמי גת',
+}
+
+function resolveDepartmentName(rawNumber: string): string {
+  if (!rawNumber) return ''
+  const n = Number(rawNumber)
+  if (Number.isFinite(n) && DEPARTMENT_NAMES[n]) return DEPARTMENT_NAMES[n]
+  return `מחלקה ${rawNumber}`
+}
+
 type RawSheetRows = unknown[][]
 
 interface DetectionResult {
@@ -253,7 +292,7 @@ function parseEmployeeDataRows(rows: RawSheetRows, xlsx: XlsxRuntime): EmployeeR
       ),
       email: emailIdx >= 0 ? normalizeText(row[emailIdx]) : '',
       phone: normalizePhone(row[headerIndex.get(canonicalizeHeader('טלפון')) ?? -1]),
-      department: departmentNumber ? `מחלקה ${departmentNumber}` : '',
+      department: resolveDepartmentName(departmentNumber),
       city,
       address: [street, houseNumber, city].filter(Boolean).join(' '),
     })
