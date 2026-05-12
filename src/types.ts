@@ -1,4 +1,4 @@
-export type UploadedFileKind = 'employee_data' | 'gmal_report'
+export type UploadedFileKind = 'employee_data' | 'gmal_report' | 'restigo_workforce'
 
 export type PensionStatus =
   | 'יש קופה'
@@ -35,6 +35,22 @@ export interface CoverageRecord {
   taxYear: number | null
 }
 
+// Restigo "דוח מצבת כח אדם" — workforce composition with active-fund flag.
+// Source columns: שם עובד, מספר עובד, מספר מיכפל, ת.ז / דרכון, סניף, משכורת,
+// טופס 101, תאריך תחילת עבודה, קרן פנסיה, שם קרן פנסיה, פרטי בנק.
+export interface RestigoWorkforceRecord {
+  restigoId: string
+  michpalId: string
+  nationalId: string
+  name: string
+  branch: string
+  salary: string
+  startDate: Date | null
+  form101Status: string
+  fundIndicator: string // "קיימת קרן פנסיה" / "לא קיימת קרן פנסיה"
+  fundName: string // Empty when no fund reported.
+}
+
 export interface ParsedUploadedFile {
   id: string
   fileName: string
@@ -47,6 +63,10 @@ export interface ParsedUploadedFile {
   issues: string[]
   employees: EmployeeRecord[]
   coverages: CoverageRecord[]
+  restigoWorkforce: RestigoWorkforceRecord[]
+  // Only populated for gmal_report files: employeeId → gross salary in NIS
+  // (sum of סכום נדרש + שווי נדרש across all rows where שם רכיב שכר is set).
+  grossSalaryByEmployee: Record<string, number>
 }
 
 export interface PensionStatusRow {
@@ -74,4 +94,5 @@ export interface PensionStatusRow {
   fundLabels: string[]
   primaryFund: string
   hasIdMismatch: boolean
+  grossSalary: number | null
 }

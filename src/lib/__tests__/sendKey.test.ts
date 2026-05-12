@@ -2,39 +2,31 @@ import { describe, it, expect } from 'vitest'
 import { buildWebhookUrl, parseSendKey } from '../sendKey'
 
 describe('parseSendKey', () => {
-  it('parses a valid 3-part key', () => {
-    expect(parseSendKey('orenmeshi=pension/notify=secret123')).toEqual({
-      name: 'orenmeshi',
-      urlPath: 'pension/notify',
-      secret: 'secret123',
-    })
+  it('accepts a non-empty secret of sufficient length', () => {
+    expect(parseSendKey('s3cret-value-123')).toEqual({ secret: 's3cret-value-123' })
   })
 
-  it('trims whitespace around parts', () => {
-    expect(parseSendKey('  test = a/b = xyz  ')).toEqual({
-      name: 'test',
-      urlPath: 'a/b',
-      secret: 'xyz',
-    })
+  it('trims surrounding whitespace', () => {
+    expect(parseSendKey('   my-secret-key   ')).toEqual({ secret: 'my-secret-key' })
   })
 
   it('returns null for empty input', () => {
     expect(parseSendKey('')).toBeNull()
+    expect(parseSendKey('   ')).toBeNull()
   })
 
-  it('returns null when fewer than 3 parts', () => {
-    expect(parseSendKey('only=two')).toBeNull()
-    expect(parseSendKey('one')).toBeNull()
+  it('returns null for secrets shorter than 8 characters', () => {
+    expect(parseSendKey('short')).toBeNull()
+    expect(parseSendKey('1234567')).toBeNull()
+    expect(parseSendKey('12345678')).toEqual({ secret: '12345678' })
   })
 
-  it('returns null when more than 3 parts', () => {
-    expect(parseSendKey('a=b=c=d')).toBeNull()
-  })
-
-  it('returns null when any part is empty', () => {
-    expect(parseSendKey('a==c')).toBeNull()
-    expect(parseSendKey('=b=c')).toBeNull()
-    expect(parseSendKey('a=b=')).toBeNull()
+  it('does not interpret = characters specially', () => {
+    // Legacy 3-part keys were name=path=secret; the new format treats them
+    // as one opaque secret. That's intentional — users updating from the old
+    // format will fail authentication and re-enter just the secret.
+    const legacy = 'orenmeshi=pension/notify=secret123'
+    expect(parseSendKey(legacy)).toEqual({ secret: legacy })
   })
 })
 

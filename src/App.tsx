@@ -10,10 +10,12 @@ import {
   Filter,
   HelpCircle,
   Info,
+  Mail,
   MessageCircleMore,
   RefreshCcw,
   Search,
   ShieldAlert,
+  Sparkles,
   Trash2,
   Upload,
   Users,
@@ -21,9 +23,21 @@ import {
 } from 'lucide-react'
 
 import './App.css'
-import { exportRowsToWorkbook } from './lib/export'
-import { kindLabel, parseUploadedFile } from './lib/excel'
-import { buildRenderedMessages, sendSelectedToN8n, sendTestMessages, type SendResult } from './lib/n8n'
+import {
+  exportAgentWorkbook,
+  exportRowsToWorkbook,
+  triggerWorkbookDownload,
+  type AgentExportSummary,
+} from './lib/export'
+import { kindLabel, parseUploadedFile, requiredHeadersFor } from './lib/excel'
+import { extractActiveFundEmployees, type ActiveFundEmployee } from './lib/restigo'
+import {
+  buildRenderedMessages,
+  sendAgentEmailViaN8n,
+  sendSelectedToN8n,
+  sendTestMessages,
+  type SendResult,
+} from './lib/n8n'
 import { parseSendKey } from './lib/sendKey'
 import {
   analyzePensionStatus,
@@ -43,58 +57,42 @@ interface EmployeeActionState {
 
 interface AppSettings {
   sendKey: string
-  templateText: string
   deadlineOverride: string // ISO YYYY-MM-DD; empty = auto (15th of eligibility month)
   testPhone: string
+  agentEmail: string
 }
 
 interface FileSlots {
   employee: ParsedUploadedFile | null
   gmal: ParsedUploadedFile | null
+  restigo: ParsedUploadedFile | null
   unknown: ParsedUploadedFile[]
 }
 
-type SlotKey = 'employee' | 'gmal'
+type SlotKey = 'employee' | 'gmal' | 'restigo'
 
 const EMPLOYEE_STATE_STORAGE_KEY = 'pension-status-employee-state-v2'
-const SETTINGS_STORAGE_KEY = 'pension-status-settings-v3'
+const SETTINGS_STORAGE_KEY = 'pension-status-settings-v4'
 
-const TEMPLATE_PRESET_A = `שלום {{first_name}} 👋
-
-רצינו לעדכן שהחל מחודש {{eligibility_month}} נתחיל להפקיד עבורך כספים לפנסיה.
-
-מה עליך לעשות?
-
-זה הזמן לבחור את הקופה שמתאימה לך ולשלוח לנו את הפרטים למייל: {{payroll_email}}. נשמח לקבל אותם לא יאוחר מה-{{deadline_date}}.
-
-חשוב לדעת: אם לא נקבל עדכון עד המועד הזה, נפתח עבורך קופת ברירת מחדל כדי לוודא שהזכויות שלך נשמרות והכסף מופקד בזמן.
-
-בברכה,
-מחלקת שכר, אורן משי 🩵`
-
-const TEMPLATE_PRESET_B = `שלום {{first_name}},
+// The single approved WhatsApp template — `pension_agent_contact_v2`. The
+// 3-template design (א/ב/ג) was simplified to one nudge: the agent will
+// reach out, and the employee can also pick a fund themselves before the
+// deadline. Any change to this text requires re-approval at Meta.
+const PENSION_TEMPLATE = `שלום {{first_name}},
 
 בשעה טובה! החל מחודש העבודה {{eligibility_month}} מתחילות ההפרשות הפנסיוניות שלך.
 
 כדי לעזור לך לבחור את המסלול הכי נכון עבורך, סוכן הפנסיה שלנו יצור איתך קשר בקרוב. כמובן שתמיד עומדת לרשותך הזכות לבחור בכל סוכן או קופה אחרת שתעדיף.
 
-אם בחרת קופה באופן עצמאי, רק נבקש שתשלח לנו את הפרטים עד ה-{{deadline_date}} לכתובת המייל: {{payroll_email}}.
-
 בהצלחה,
 מחלקת שכר, אורן משי 🩵`
 
-const TEMPLATE_PRESET_C = `שלום {{first_name}},
-
-רצינו לוודא שהכל מעודכן: הפרשות הפנסיה שלך מופקדות כרגע בקופה {{primary_fund}}.
-
-אם תרצה לשנות את הקופה, להעביר לנו מסמכים חדשים או פשוט לעדכן פרטים — אנחנו זמינים עבורך במייל: {{payroll_email}}.
-
-תודה,
-מחלקת שכר, אורן משי 🩵`
-
-const DEFAULT_TEMPLATE_TEXT = TEMPLATE_PRESET_A
-
-const SLOT_GUIDES: Record<SlotKey, { title: string; subtitle: string; export: string }> = {
+const SLOT_GUIDES: Record<SlotKey, {
+  title: string
+  subtitle: string
+  export: string
+  optional?: boolean
+}> = {
   employee: {
     title: 'נתוני עובד',
     subtitle: 'קובץ העובדים ממיכפל (פרטי עובד + סטטוס פעילים)',
@@ -105,12 +103,19 @@ const SLOT_GUIDES: Record<SlotKey, { title: string; subtitle: string; export: st
     subtitle: 'קובץ הרכב שכר וגמל',
     export: 'ייצוא במיכפל: ייצוא ← דוחות לאקסל ← הרכב שכר וגמל ← ללא שינוי במסננים',
   },
+  restigo: {
+    title: 'רסטיגו — מצבת כח אדם',
+    subtitle: 'דוח מצבת כח אדם — לבדיקת קופות פעילות',
+    export: 'ברסטיגו: דוחות ← מצבת כח אדם ← ייצוא לאקסל',
+    optional: true,
+  },
 }
 
 function App() {
   const batchInputId = useId()
   const employeeInputId = useId()
   const gmalInputId = useId()
+  const restigoInputId = useId()
   const [reportMonth, setReportMonth] = useState(getCurrentMonthInputValue)
   const [isParsing, setIsParsing] = useState(false)
   const [isExportingAgent, setIsExportingAgent] = useState(false)
@@ -120,6 +125,7 @@ function App() {
   const [fileSlots, setFileSlots] = useState<FileSlots>({
     employee: null,
     gmal: null,
+    restigo: null,
     unknown: [],
   })
   const [uploadError, setUploadError] = useState('')
@@ -138,9 +144,11 @@ function App() {
   const [whatsappPreview, setWhatsappPreview] = useState<{
     rows: PensionStatusRow[]
   } | null>(null)
+  const [showTemplatePreview, setShowTemplatePreview] = useState(false)
 
   const selectedEmployeeFile = fileSlots.employee
   const selectedGmalFile = fileSlots.gmal
+  const selectedRestigoFile = fileSlots.restigo
   const analysisIssues = [
     selectedEmployeeFile ? '' : 'חסר קובץ נתוני עובד.',
     selectedGmalFile ? '' : 'חסר קובץ דוח גמל.',
@@ -153,6 +161,7 @@ function App() {
             selectedEmployeeFile.employees,
             selectedGmalFile.coverages,
             reportMonth,
+            selectedGmalFile.grossSalaryByEmployee,
           )
         : [],
     [selectedEmployeeFile, selectedGmalFile, analysisIssues.length, reportMonth],
@@ -161,6 +170,14 @@ function App() {
   const fundOptions = Array.from(new Set(rows.map((row) => row.primaryFund))).sort((a, b) =>
     a.localeCompare(b, 'he'),
   )
+
+  const activeFundEmployees: ActiveFundEmployee[] = useMemo(() => {
+    if (!selectedRestigoFile) return []
+    return extractActiveFundEmployees({
+      records: selectedRestigoFile.restigoWorkforce,
+      employees: selectedEmployeeFile?.employees ?? [],
+    })
+  }, [selectedRestigoFile, selectedEmployeeFile])
 
   const normalizedSearch = searchTerm.trim().toLowerCase()
   const filteredRows = rows
@@ -188,6 +205,7 @@ function App() {
   }
 
   const sendKeyValid = parseSendKey(settings.sendKey) !== null
+  const agentEmailValid = isValidEmail(settings.agentEmail.trim())
 
   useEffect(() => {
     window.localStorage.setItem(EMPLOYEE_STATE_STORAGE_KEY, JSON.stringify(employeeState))
@@ -200,6 +218,7 @@ function App() {
   function applyParsedFiles(parsedGroups: ParsedUploadedFile[][], options: { reset?: boolean }) {
     let nextEmployee = options.reset ? null : fileSlots.employee
     let nextGmal = options.reset ? null : fileSlots.gmal
+    let nextRestigo = options.reset ? null : fileSlots.restigo
     const nextUnknown: ParsedUploadedFile[] = options.reset ? [] : [...fileSlots.unknown]
     const nextIssues: string[] = []
 
@@ -223,6 +242,15 @@ function App() {
           continue
         }
 
+        if (file.kind === 'restigo_workforce') {
+          if (nextRestigo) {
+            nextIssues.push(`זוהה עוד קובץ רסטיגו (${file.fileName}). נשמר הקובץ הקודם.`)
+            continue
+          }
+          nextRestigo = file
+          continue
+        }
+
         nextUnknown.push(file)
       }
     }
@@ -230,6 +258,7 @@ function App() {
     setFileSlots({
       employee: nextEmployee,
       gmal: nextGmal,
+      restigo: nextRestigo,
       unknown: nextUnknown,
     })
     setUploadIssues(nextIssues)
@@ -270,16 +299,30 @@ function App() {
 
     try {
       const parsedFiles = await parseUploadedFile(file)
-      const expectedKind = slot === 'employee' ? 'employee_data' : 'gmal_report'
+      const expectedKind =
+        slot === 'employee' ? 'employee_data' : slot === 'gmal' ? 'gmal_report' : 'restigo_workforce'
 
       const matched = parsedFiles.find((parsed) => parsed.kind === expectedKind)
       if (!matched) {
-        const expectedLabel = slot === 'employee' ? 'נתוני עובד' : 'דוח גמל'
+        const expectedLabel =
+          slot === 'employee' ? 'נתוני עובד' : slot === 'gmal' ? 'דוח גמל' : 'רסטיגו'
         const detected = parsedFiles
-          .map((parsed) => (parsed.kind === 'unknown' ? 'לא מזוהה' : kindLabel(parsed.kind)))
+          .map((parsed) =>
+            parsed.kind === 'unknown' ? 'לא מזוהה' : kindLabel(parsed.kind),
+          )
           .join(', ')
+        const required = requiredHeadersFor(expectedKind).join(', ')
+        const missingHint = parsedFiles
+          .flatMap((parsed) =>
+            parsed.candidateKind === expectedKind && parsed.missingHeaders.length > 0
+              ? [`חסרות הכותרות: ${parsed.missingHeaders.join(', ')}.`]
+              : [],
+          )
+          .join(' ')
         setUploadError(
-          `הקובץ שהועלה לא מתאים לשדה ${expectedLabel}. זוהה כ-${detected || 'לא מזוהה'}.`,
+          `הקובץ שהועלה לא מתאים לשדה ${expectedLabel}. זוהה כ-${detected || 'לא מזוהה'}. ${
+            missingHint || `שדות חובה: ${required}.`
+          }`,
         )
         return
       }
@@ -307,6 +350,7 @@ function App() {
     setFileSlots({
       employee: null,
       gmal: null,
+      restigo: null,
       unknown: [],
     })
     setUploadError('')
@@ -334,30 +378,80 @@ function App() {
     )
   }
 
-  async function handleAgentExport() {
+  async function handleAgentExport(options?: { thenEmail?: boolean }) {
     if (selectedRows.length === 0) {
       setActionMessage('בחר לפחות עובד אחד לפני ייצוא לסוכן.')
-      return
+      return null
+    }
+
+    const trimmedAgentEmail = settings.agentEmail.trim()
+    const trimmedAgentEmailValid = isValidEmail(trimmedAgentEmail)
+
+    if (options?.thenEmail) {
+      if (!trimmedAgentEmailValid) {
+        setActionMessage('כדי לשלוח לסוכן במייל יש להזין כתובת מייל תקינה בהגדרות.')
+        return null
+      }
+      if (!sendKeyValid) {
+        setActionMessage(
+          'כדי לשלוח לסוכן במייל יש להזין מפתח שליחה תקין בהגדרות.',
+        )
+        return null
+      }
     }
 
     setIsExportingAgent(true)
     setActionMessage('')
 
+    const fileName = `pension-agent-${reportMonth}.xlsx`
     try {
-      await exportRowsToWorkbook(
-        selectedRows.map((row) => buildAgentExportRow(row, employeeState[row.employeeId])),
-        `pension-agent-${reportMonth}.xlsx`,
-        'לסוכן פנסיה',
+      const { buffer, summary } = await exportAgentWorkbook(
+        selectedRows,
+        activeFundEmployees.map((entry) => entry.restigo),
+        { reportMonth, generatedAt: new Date() },
       )
+      // Always download a local copy as proof — even when emailing.
+      await triggerWorkbookDownload(buffer, fileName)
       const timestamp = new Date().toISOString()
       updateEmployeeState(
         selectedRows.map((row) => row.employeeId),
         (current) => ({ ...current, exportedToAgentAt: timestamp }),
       )
-      setActionMessage(`ירד קובץ סוכן עבור ${selectedRows.length} עובדים.`)
+
+      if (options?.thenEmail) {
+        try {
+          const result = await sendAgentEmailViaN8n({
+            sendKey: settings.sendKey,
+            agentEmail: trimmedAgentEmail,
+            reportMonth,
+            fileBuffer: buffer,
+            fileName,
+            summary,
+          })
+          setActionMessage(
+            `המייל נשלח ל-${result.to ?? trimmedAgentEmail} עם הקובץ "${fileName}" (${summary.total} עובדים, ${countTabsLabel(summary)}).`,
+          )
+        } catch (error) {
+          setActionMessage(
+            error instanceof Error
+              ? `הקובץ ירד מקומית אך שליחת המייל נכשלה: ${error.message}`
+              : 'הקובץ ירד מקומית אך שליחת המייל נכשלה.',
+          )
+        }
+      } else {
+        setActionMessage(
+          `ירד קובץ סוכן עם ${summary.total} עובדים ב-${countTabsLabel(summary)}.`,
+        )
+      }
+      return summary
     } finally {
       setIsExportingAgent(false)
     }
+  }
+
+  function isValidEmail(value: string): boolean {
+    if (!value) return false
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
   }
 
   async function handleFullExport() {
@@ -420,14 +514,10 @@ function App() {
         sendKey: settings.sendKey,
         reportMonth,
         testPhone: phone,
-        templates: [
-          { label: 'א', text: TEMPLATE_PRESET_A },
-          { label: 'ב', text: TEMPLATE_PRESET_B },
-          { label: 'ג', text: TEMPLATE_PRESET_C },
-        ],
+        templateText: PENSION_TEMPLATE,
         deadlineOverride: settings.deadlineOverride || undefined,
       })
-      setActionMessage(`נשלחו 3 הודעות בדיקה ל-${phone}.`)
+      setActionMessage(`נשלחה הודעת בדיקה ל-${phone}.`)
     } catch (error) {
       setActionMessage(error instanceof Error ? error.message : 'שליחת בדיקה נכשלה.')
     } finally {
@@ -443,7 +533,7 @@ function App() {
     try {
       const result = await sendSelectedToN8n({
         sendKey: settings.sendKey,
-        templateText: settings.templateText,
+        templateText: PENSION_TEMPLATE,
         reportMonth,
         rows: whatsappPreview.rows,
         deadlineOverride: settings.deadlineOverride || undefined,
@@ -560,7 +650,7 @@ function App() {
           </div>
         </section>
 
-        <section className="file-band file-slots-2">
+        <section className="file-band file-slots-3">
           <FileSlotCard
             guide={SLOT_GUIDES.employee}
             file={fileSlots.employee}
@@ -583,33 +673,54 @@ function App() {
             }}
             onClear={() => clearSlot('gmal')}
           />
+          <FileSlotCard
+            guide={SLOT_GUIDES.restigo}
+            file={fileSlots.restigo}
+            inputId={restigoInputId}
+            isParsing={isParsing}
+            onChange={(event) => {
+              void handleSingleFileChange('restigo', event.target.files)
+              event.target.value = ''
+            }}
+            onClear={() => clearSlot('restigo')}
+          />
         </section>
+
+        {selectedRestigoFile && (
+          <RestigoActiveFundsPanel
+            entries={activeFundEmployees}
+            restigoFile={selectedRestigoFile}
+            employeeFile={selectedEmployeeFile}
+          />
+        )}
 
         <section className="integration-band">
           <div className="integration-copy">
             <span className="eyebrow">n8n + WhatsApp</span>
             <h2>הגדרות שליחת הודעת פנסיה</h2>
             <p>
-              ההודעה נשלחת לעובדים עצמם דרך webhook ב-n8n (ושם ל-Glassix). מפתח
-              השליחה משלב שלושה חלקים: שם סביבה, נתיב webhook וסיקרט.
+              ההודעות לעובדים (WhatsApp דרך Glassix) ולסוכן הפנסיה (מייל דרך
+              Outlook) נשלחות דרך n8n. אותו סיקרט משמש לשני סוגי השליחה — די
+              להזין אותו פעם אחת כאן.
             </p>
           </div>
 
           <div className="integration-form">
             <label className="full-width">
-              <span>מפתח שליחה (n8n)</span>
+              <span>מפתח שליחה</span>
               <div className="input-row">
                 <input
                   type={showSendKey ? 'text' : 'password'}
-                  placeholder="orenmeshi=pension/notify=secret123"
+                  placeholder="הזן את הסיקרט מ-n8n"
                   value={settings.sendKey}
                   onChange={(event) =>
                     setSettings((current) => ({
                       ...current,
-                      sendKey: event.target.value.trim(),
+                      sendKey: event.target.value,
                     }))
                   }
                   className={settings.sendKey && !sendKeyValid ? 'invalid' : ''}
+                  autoComplete="off"
                 />
                 <button
                   type="button"
@@ -623,9 +734,9 @@ function App() {
               <small>
                 {settings.sendKey
                   ? sendKeyValid
-                    ? '✓ מפתח תקין'
-                    : '✗ פורמט שגוי. דוגמה: name=path=secret'
-                  : 'פורמט: name=path=secret'}
+                    ? '✓ מפתח תקין. אותו מפתח משמש לשליחת WhatsApp ולמייל לסוכן.'
+                    : '✗ הסיקרט קצר מדי (נדרשים לפחות 8 תווים).'
+                  : 'הזן את הסיקרט שהגדרת ב-credential של n8n (לפחות 8 תווים).'}
               </small>
             </label>
 
@@ -646,61 +757,60 @@ function App() {
               </small>
             </label>
 
-            <label className="full-width">
-              <span>טקסט הטמפלייט</span>
-              <div className="template-presets">
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() =>
-                    setSettings((current) => ({ ...current, templateText: TEMPLATE_PRESET_A }))
-                  }
-                  title="הודעה לעובדים בלי קופה — מתחילה הפרשה"
-                >
-                  טען הודעה א (תחילת הפרשה)
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() =>
-                    setSettings((current) => ({ ...current, templateText: TEMPLATE_PRESET_B }))
-                  }
-                  title="הודעה לעובדים בלי קופה — סוכן ייצור קשר"
-                >
-                  טען הודעה ב (סוכן ייצור קשר)
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() =>
-                    setSettings((current) => ({ ...current, templateText: TEMPLATE_PRESET_C }))
-                  }
-                  title="הודעה לעובדים שכבר יש להם קופה"
-                >
-                  טען הודעה ג (יש קופה)
-                </button>
-              </div>
-              <textarea
-                className="template-textarea"
-                rows={12}
-                value={settings.templateText}
+            <label>
+              <span>מייל סוכן הפנסיה</span>
+              <input
+                type="email"
+                placeholder="agent@example.com"
+                value={settings.agentEmail}
                 onChange={(event) =>
                   setSettings((current) => ({
                     ...current,
-                    templateText: event.target.value,
+                    agentEmail: event.target.value.trim(),
                   }))
+                }
+                className={
+                  settings.agentEmail && !isValidEmail(settings.agentEmail)
+                    ? 'invalid'
+                    : ''
                 }
               />
               <small>
-                המשתנים נכנסים אוטומטית בשליחה. זמינים:{' '}
-                <code>{'{{first_name}}'}</code>, <code>{'{{eligibility_month}}'}</code>,{' '}
-                <code>{'{{deadline_date}}'}</code>, <code>{'{{payroll_email}}'}</code>,{' '}
-                <code>{'{{primary_fund}}'}</code>
+                {settings.agentEmail
+                  ? isValidEmail(settings.agentEmail)
+                    ? '✓ נשלח כקובץ מצורף דרך n8n + Outlook.'
+                    : '✗ כתובת מייל לא תקינה.'
+                  : 'הסוכן יקבל את הקובץ דרך n8n + Outlook (לא mailto).'}
               </small>
             </label>
 
             <label className="full-width">
-              <span>בדיקת תבניות — שלח את 3 הנוסחים לטלפון</span>
+              <span>טקסט ההודעה לעובד (WhatsApp)</span>
+              <p className="template-help">
+                ההודעה נשלחת לעובדים שטרם נפתחה להם קופת פנסיה — היא מודיעה
+                שהפרשות מתחילות ושסוכן הפנסיה יצור איתם קשר. נוסח אחיד מאושר
+                ב-Meta תחת השם <code>pension_agent_contact_v2</code>. כל שינוי
+                בטקסט מצריך אישור מחדש — מסיבה זו אין כאן עורך.
+              </p>
+              <div className="template-presets">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => setShowTemplatePreview(true)}
+                  title="פתיחת תצוגה מקדימה של ההודעה על נתוני דמה"
+                >
+                  <Eye size={16} />
+                  <span>תצוגה מקדימה</span>
+                </button>
+              </div>
+              <small>
+                משתנים שמוחלפים בשליחה:{' '}
+                <code>{'{{first_name}}'}</code>, <code>{'{{eligibility_month}}'}</code>.
+              </small>
+            </label>
+
+            <label className="full-width">
+              <span>בדיקת תבנית — שלח את ההודעה אלי לטלפון</span>
               <div className="template-presets">
                 <input
                   type="tel"
@@ -724,17 +834,17 @@ function App() {
                   disabled={isSendingTest || !sendKeyValid || !settings.testPhone.trim()}
                   title={
                     sendKeyValid
-                      ? 'שליחת 3 ההודעות (א/ב/ג) על נתוני דמה למספר הבדיקה'
+                      ? 'שליחת ההודעה על נתוני דמה למספר הבדיקה'
                       : 'יש להזין מפתח שליחה תקין'
                   }
                 >
                   <MessageCircleMore size={16} />
-                  <span>{isSendingTest ? 'שולח...' : 'שלח 3 נוסחים אלי'}</span>
+                  <span>{isSendingTest ? 'שולח...' : 'שלח הודעת בדיקה אלי'}</span>
                 </button>
               </div>
               <small>
-                שולח את נוסח א, ב ו-ג אל הטלפון הזה עם נתוני דמה (אורן, חודש הדיווח הנוכחי, קופה
-                "כלל פנסיה"). לא משפיע על העובדים האמיתיים ולא נספר ב-"נשלח".
+                שולח את ההודעה לטלפון הזה עם נתוני דמה (אורן, חודש הדיווח הנוכחי). לא
+                משפיע על העובדים האמיתיים ולא נספר ב-"נשלח".
               </small>
             </label>
           </div>
@@ -922,10 +1032,34 @@ function App() {
                   void handleAgentExport()
                 }}
                 disabled={isExportingAgent}
-                title="הורדת קובץ Excel של העובדים שנבחרו לשליחה ידנית לסוכן הפנסיה"
+                title="הורדת קובץ Excel מעוצב עם לשוניות לפי סטטוס — לסוכן הפנסיה"
               >
                 <Download size={18} />
                 <span>{isExportingAgent ? 'מייצא...' : 'ייצוא לסוכן (Excel)'}</span>
+              </button>
+              <button
+                type="button"
+                className="upload-button secondary"
+                onClick={() => {
+                  void handleAgentExport({ thenEmail: true })
+                }}
+                disabled={
+                  isExportingAgent ||
+                  !agentEmailValid ||
+                  !sendKeyValid
+                }
+                title={
+                  !agentEmailValid
+                    ? 'יש להזין כתובת מייל תקינה של הסוכן בהגדרות'
+                    : !sendKeyValid
+                      ? 'יש להזין מפתח שליחה תקין בהגדרות'
+                      : `שולח קובץ Excel ל-${settings.agentEmail} דרך n8n + Outlook`
+                }
+              >
+                <Mail size={18} />
+                <span>
+                  {isExportingAgent ? 'מכין...' : 'שלח לסוכן במייל (n8n)'}
+                </span>
               </button>
               <button
                 type="button"
@@ -977,6 +1111,7 @@ function App() {
                     <th>טלפון</th>
                     <th>מחלקה</th>
                     <th>קופה</th>
+                    <th>שכר ברוטו</th>
                     <th>תחילת עבודה</th>
                     <th>חודש תחילת הפרשה</th>
                     <th>חודשים שנותרו / איחור</th>
@@ -1008,13 +1143,22 @@ function App() {
       {whatsappPreview && (
         <WhatsappPreviewModal
           rows={whatsappPreview.rows}
-          template={settings.templateText}
+          template={PENSION_TEMPLATE}
           deadlineOverride={settings.deadlineOverride || undefined}
           onCancel={() => setWhatsappPreview(null)}
           onConfirm={() => {
             void confirmWhatsappSend()
           }}
           isSending={isSendingWhatsapp}
+        />
+      )}
+
+      {showTemplatePreview && (
+        <TemplatePreviewModal
+          template={PENSION_TEMPLATE}
+          reportMonth={reportMonth}
+          deadlineOverride={settings.deadlineOverride || undefined}
+          onClose={() => setShowTemplatePreview(false)}
         />
       )}
     </div>
@@ -1029,7 +1173,7 @@ function FileSlotCard({
   onChange,
   onClear,
 }: {
-  guide: { title: string; subtitle: string; export: string }
+  guide: { title: string; subtitle: string; export: string; optional?: boolean }
   file: ParsedUploadedFile | null
   inputId: string
   isParsing: boolean
@@ -1037,10 +1181,13 @@ function FileSlotCard({
   onClear: () => void
 }) {
   return (
-    <article className={`file-card slot-card ${file ? 'valid' : ''}`}>
+    <article className={`file-card slot-card ${file ? 'valid' : ''} ${guide.optional ? 'optional' : ''}`}>
       <div className="file-card-top">
         <div>
-          <span className="file-chip">{guide.title}</span>
+          <span className="file-chip">
+            {guide.title}
+            {guide.optional && <em className="slot-optional">רשות</em>}
+          </span>
           <h2>
             {file
               ? file.sheetName
@@ -1053,7 +1200,9 @@ function FileSlotCard({
       </div>
 
       <p className="file-meta">
-        {file ? `זוהה כ-${kindLabel(file.kind as 'employee_data' | 'gmal_report')}` : guide.subtitle}
+        {file
+          ? `זוהה כ-${kindLabel(file.kind as 'employee_data' | 'gmal_report' | 'restigo_workforce')}`
+          : guide.subtitle}
       </p>
 
       <p className="export-hint">
@@ -1107,6 +1256,9 @@ function EmployeeRow({
       <td>
         <span className={`fund-pill ${row.coverageKind}`}>{row.primaryFund}</span>
       </td>
+      <td className="numeric-cell">
+        {row.grossSalary !== null ? `${row.grossSalary.toLocaleString('he-IL')} ₪` : '—'}
+      </td>
       <td>{formatDate(row.startDate)}</td>
       <td>{formatMonth(row.eligibilityMonth)}</td>
       <td className="numeric-cell">{describeTimeline(row)}</td>
@@ -1115,6 +1267,232 @@ function EmployeeRow({
       </td>
       <td>{row.detail}</td>
     </tr>
+  )
+}
+
+function RestigoActiveFundsPanel({
+  entries,
+  restigoFile,
+  employeeFile,
+}: {
+  entries: ActiveFundEmployee[]
+  restigoFile: ParsedUploadedFile
+  employeeFile: ParsedUploadedFile | null
+}) {
+  const [filter, setFilter] = useState<'all' | 'unmatched' | 'matched'>('all')
+  const [search, setSearch] = useState('')
+
+  const filtered = entries
+    .filter((entry) => {
+      if (filter === 'unmatched') return entry.matchKind === 'unmatched'
+      if (filter === 'matched') return entry.matchKind !== 'unmatched'
+      return true
+    })
+    .filter((entry) => {
+      const needle = search.trim().toLowerCase()
+      if (!needle) return true
+      const r = entry.restigo
+      const haystack = `${r.name} ${r.michpalId} ${r.restigoId} ${r.nationalId} ${r.fundName} ${r.branch}`.toLowerCase()
+      return haystack.includes(needle)
+    })
+
+  return (
+    <section className="restigo-band">
+      <div className="restigo-head">
+        <div>
+          <span className="eyebrow">רסטיגו — בדיקת קופות פעילות</span>
+          <h2>עובדים לבדיקת קופה פעילה ({entries.length})</h2>
+          <p className="restigo-meta">
+            {restigoFile.rowCount.toLocaleString('he-IL')} עובדים בדוח מצבת כח אדם
+            {employeeFile && ` · ${employeeFile.rowCount.toLocaleString('he-IL')} עובדים פעילים במיכפל`}
+            {' · '}
+            רק עובדים עם טקסט בשם קרן פנסיה נכללים כאן
+          </p>
+        </div>
+
+        <div className="restigo-controls">
+          <div className="filter-group" role="group" aria-label="סינון">
+            <button
+              type="button"
+              className={filter === 'all' ? 'is-active' : ''}
+              onClick={() => setFilter('all')}
+            >
+              הכל ({entries.length})
+            </button>
+            <button
+              type="button"
+              className={filter === 'unmatched' ? 'is-active' : ''}
+              onClick={() => setFilter('unmatched')}
+            >
+              חדשים לחלוטין ({entries.filter((e) => e.matchKind === 'unmatched').length})
+            </button>
+            <button
+              type="button"
+              className={filter === 'matched' ? 'is-active' : ''}
+              onClick={() => setFilter('matched')}
+            >
+              קיימים במיכפל ({entries.filter((e) => e.matchKind !== 'unmatched').length})
+            </button>
+          </div>
+
+          <label className="search-control">
+            <Search size={16} />
+            <input
+              type="search"
+              placeholder="חיפוש (שם / ת.ז. / קופה / סניף)"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </label>
+        </div>
+      </div>
+
+      {entries.length === 0 ? (
+        <div className="empty-state restigo-empty">
+          <Sparkles size={24} />
+          <p>
+            לא נמצאו עובדים עם טקסט בעמודת "שם קרן פנסיה" בדוח. אין מה לשלוח לסוכן
+            לבדיקה.
+          </p>
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="empty-state restigo-empty">
+          <p>אין שורות להצגה תחת הסינון/חיפוש הנוכחי.</p>
+        </div>
+      ) : (
+        <div className="table-wrap">
+          <table className="restigo-table">
+            <thead>
+              <tr>
+                <th>שם</th>
+                <th>מספר מיכפל</th>
+                <th>מספר רסטיגו</th>
+                <th>ת.ז.</th>
+                <th>סניף</th>
+                <th>תאריך תחילה</th>
+                <th>שם קרן פנסיה</th>
+                <th>מצב קרן פנסיה</th>
+                <th>סטטוס התאמה</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((entry) => (
+                <tr key={`${entry.restigo.restigoId}-${entry.restigo.nationalId}`}>
+                  <td>
+                    <div className="name-cell">
+                      <strong>{entry.restigo.name || '—'}</strong>
+                    </div>
+                  </td>
+                  <td className="numeric-cell">{entry.restigo.michpalId || '—'}</td>
+                  <td className="numeric-cell">{entry.restigo.restigoId || '—'}</td>
+                  <td className="numeric-cell">{entry.restigo.nationalId || '—'}</td>
+                  <td>{entry.restigo.branch || '—'}</td>
+                  <td>{entry.restigo.startDate ? formatDate(entry.restigo.startDate) : '—'}</td>
+                  <td>
+                    <span className="fund-pill">{entry.restigo.fundName}</span>
+                  </td>
+                  <td>{entry.restigo.fundIndicator || '—'}</td>
+                  <td>
+                    <span
+                      className={`status-pill ${
+                        entry.matchKind === 'unmatched' ? 'late' : 'covered'
+                      }`}
+                    >
+                      {entry.matchKind === 'unmatched'
+                        ? 'אין במיכפל'
+                        : entry.matchKind === 'by_michpal_id'
+                          ? 'תואם לפי מספר מיכפל'
+                          : 'תואם לפי ת.ז.'}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function TemplatePreviewModal({
+  template,
+  reportMonth,
+  deadlineOverride,
+  onClose,
+}: {
+  template: string
+  reportMonth: string
+  deadlineOverride: string | undefined
+  onClose: () => void
+}) {
+  const monthMatch = reportMonth.match(/^(\d{4})-(\d{2})$/)
+  const eligibilityMonth = monthMatch
+    ? new Date(Number(monthMatch[1]), Number(monthMatch[2]) - 1, 1)
+    : new Date()
+  const sampleRow: PensionStatusRow = {
+    employeeId: 'preview',
+    name: 'אורן משי',
+    firstName: 'אורן',
+    nationalId: '000000000',
+    gender: '',
+    email: '',
+    age: 30,
+    birthDate: null,
+    startDate: null,
+    eligibilityMonth,
+    seventhMonth: null,
+    ageEligibilityMonth: null,
+    status: 'זכאי החודש',
+    detail: '',
+    monthsRemaining: 0,
+    monthsLate: null,
+    coverageKind: 'none',
+    phone: '0500000000',
+    department: '',
+    city: '',
+    address: '',
+    fundLabels: [],
+    primaryFund: 'כלל פנסיה',
+    hasIdMismatch: false,
+    grossSalary: null,
+  }
+  const rendered = buildRenderedMessages([sampleRow], template, deadlineOverride)[0]
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal-card">
+        <header className="modal-head">
+          <div>
+            <span className="eyebrow">תצוגה מקדימה</span>
+            <h2>ההודעה לעובד</h2>
+          </div>
+          <button type="button" className="ghost-button" onClick={onClose} aria-label="סגירה">
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="modal-body">
+          <p className="modal-intro">
+            כך תיראה ההודעה לעובד בפועל. המשתנים <code>{'{{first_name}}'}</code> ו-
+            <code>{'{{eligibility_month}}'}</code> מוחלפים אוטומטית בעת השליחה.
+          </p>
+          <article className="message-preview">
+            <div className="message-meta">
+              <strong>{rendered.name}</strong>
+              <span>{rendered.phone}</span>
+            </div>
+            <pre className="message-text">{rendered.text}</pre>
+          </article>
+        </div>
+
+        <footer className="modal-footer">
+          <button type="button" className="upload-button" onClick={onClose}>
+            סגירה
+          </button>
+        </footer>
+      </div>
+    </div>
   )
 }
 
@@ -1218,26 +1596,17 @@ function parseMonthValue(value: string): Date {
   return Number.isNaN(year) || Number.isNaN(month) ? new Date() : new Date(year, month - 1, 1)
 }
 
-function buildAgentExportRow(row: PensionStatusRow, _actionState: EmployeeActionState | undefined) {
-  void _actionState
-  return {
-    'מספר עובד': row.employeeId,
-    שם: row.name,
-    'מספר זהות': row.nationalId,
-    טלפון: row.phone,
-    'דוא"ל': row.email,
-    גיל: row.age ?? '',
-    'תאריך לידה': formatDate(row.birthDate),
-    מחלקה: row.department,
-    עיר: row.city,
-    כתובת: row.address,
-    קופה: row.primaryFund,
-    סטטוס: row.status,
-    'תחילת עבודה': formatDate(row.startDate),
-    'חודש תחילת הפרשה': formatMonth(row.eligibilityMonth),
-    'חודשים שנותרו / איחור': describeTimeline(row),
-    פירוט: row.detail,
+function countTabsLabel(summary: AgentExportSummary): string {
+  const statusTabs = (Object.entries(summary.perStatus) as [PensionStatus, number][])
+    .filter(([, count]) => count > 0)
+    .map(([status]) => status)
+  const extras: string[] = []
+  if (summary.activeFundsCount > 0) {
+    extras.push(`בדיקת קופות פעילות (${summary.activeFundsCount})`)
   }
+  const totalTabs = statusTabs.length + 2 + extras.length
+  const labelParts = ['סיכום', 'כל העובדים', ...statusTabs, ...extras]
+  return `${totalTabs} לשוניות (${labelParts.join(', ')})`
 }
 
 function buildFullExportRow(row: PensionStatusRow, _actionState: EmployeeActionState | undefined) {
@@ -1256,6 +1625,7 @@ function buildFullExportRow(row: PensionStatusRow, _actionState: EmployeeActionS
     כתובת: row.address,
     קופה: row.primaryFund,
     'סוג כיסוי': row.coverageKind,
+    'שכר ברוטו': row.grossSalary ?? '',
     סטטוס: row.status,
     'תחילת עבודה': formatDate(row.startDate),
     'חודש 7': formatMonth(row.seventhMonth),
@@ -1280,9 +1650,9 @@ function loadEmployeeState(): Record<string, EmployeeActionState> {
 function loadSettings(): AppSettings {
   const fallback: AppSettings = {
     sendKey: '',
-    templateText: DEFAULT_TEMPLATE_TEXT,
     deadlineOverride: '',
     testPhone: '',
+    agentEmail: '',
   }
   try {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY)
@@ -1290,9 +1660,9 @@ function loadSettings(): AppSettings {
     const parsed = JSON.parse(raw) as Partial<AppSettings>
     return {
       sendKey: parsed.sendKey ?? '',
-      templateText: parsed.templateText ?? DEFAULT_TEMPLATE_TEXT,
       deadlineOverride: parsed.deadlineOverride ?? '',
       testPhone: parsed.testPhone ?? '',
+      agentEmail: parsed.agentEmail ?? '',
     }
   } catch {
     return fallback
