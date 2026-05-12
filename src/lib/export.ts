@@ -36,13 +36,22 @@ const STATUS_TAB_COLORS: Record<PensionStatus, string> = {
   'חסר נתונים': 'FF6B7280',
 }
 
-const ACTIVE_FUNDS_TAB_COLOR = 'FF7B5720'
-
-const HEADER_FILL = 'FFF8F9FA'
-const HEADER_TEXT = 'FF1F2937'
-const ROW_BORDER_COLOR = 'FFE5E7EB'
-const NOTE_TEXT = 'FF475569'
+// "Classic Office Blue" palette — navy header on light-blue banding,
+// thin gray borders, pastel status fills.
+const ACCENT_NAVY = 'FF1F3864'
+const BAND_ALT = 'FFEAF2F8'
+const GRID_BORDER = 'FFD1D5DB'
+const NOTE_BG = 'FFF2F2F2'
+const NOTE_TEXT = 'FF374151'
 const BODY_TEXT = 'FF1F2937'
+
+const STATUS_HEADER_FILL: Record<PensionStatus, string> = {
+  'באיחור': 'FFFCE7E2',
+  'זכאי החודש': 'FFFFE6C7',
+  'טרם זכאי': 'FFFFF1D6',
+  'יש קופה': 'FFE5F4ED',
+  'חסר נתונים': 'FFEEF1F4',
+}
 
 const DEFAULT_SHEET_NOTE = [
   'סוכן יקר, יש לבדוק עם העובדים ולהציע להם קרן פנסיה מתאימה עבורם.',
@@ -210,8 +219,8 @@ function buildNeedFundSheet(
   rows: PensionStatusRow[],
 ) {
   const sheet = workbook.addWorksheet('עובדים לפתיחת קופה', {
-    views: [{ rightToLeft: true, state: 'frozen', ySplit: 2, showGridLines: false }],
-    properties: { tabColor: { argb: STATUS_TAB_COLORS['זכאי החודש'] } },
+    views: [{ rightToLeft: true, state: 'frozen', ySplit: 2, showGridLines: true }],
+    properties: { tabColor: { argb: ACCENT_NAVY } },
   })
 
   prependSheetNote(sheet, DEFAULT_SHEET_NOTE, AGENT_COLUMNS.length)
@@ -232,8 +241,8 @@ function buildActiveFundsSheet(
   records: RestigoWorkforceRecord[],
 ) {
   const sheet = workbook.addWorksheet('בדיקת קופות פעילות', {
-    views: [{ rightToLeft: true, state: 'frozen', ySplit: 2, showGridLines: false }],
-    properties: { tabColor: { argb: ACTIVE_FUNDS_TAB_COLOR } },
+    views: [{ rightToLeft: true, state: 'frozen', ySplit: 2, showGridLines: true }],
+    properties: { tabColor: { argb: ACCENT_NAVY } },
   })
 
   prependSheetNote(sheet, ACTIVE_FUNDS_SHEET_NOTE, ACTIVE_FUND_COLUMNS.length)
@@ -253,7 +262,7 @@ function buildActiveFundsSheet(
   }
 }
 
-// Insert a plain text note row at row 1 spanning the data columns. Headers
+// Insert a soft gray note row at row 1 spanning the data columns. Headers
 // move to row 2; freeze pane and autoFilter callers must reference row 2.
 function prependSheetNote(
   sheet: import('exceljs').Worksheet,
@@ -264,14 +273,15 @@ function prependSheetNote(
   sheet.mergeCells(`A1:${lastColLetter}1`)
   const noteCell = sheet.getCell('A1')
   noteCell.value = text
-  noteCell.font = { name: 'Calibri', size: 11, color: { argb: NOTE_TEXT } }
+  noteCell.font = { name: 'Calibri', size: 11, italic: true, color: { argb: NOTE_TEXT } }
   noteCell.alignment = {
     vertical: 'middle',
     horizontal: 'right',
     readingOrder: 'rtl',
     wrapText: true,
   }
-  sheet.getRow(1).height = 28
+  noteCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NOTE_BG } }
+  sheet.getRow(1).height = 26
 }
 
 function applyAgentColumnsHeaderRow(sheet: import('exceljs').Worksheet) {
@@ -307,44 +317,58 @@ function appendAgentRow(
 }
 
 function styleHeaderRow(row: import('exceljs').Row) {
-  row.height = 22
-  row.font = { name: 'Calibri', size: 11, bold: true, color: { argb: HEADER_TEXT } }
+  row.height = 26
+  row.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFFFFF' } }
   row.alignment = {
     vertical: 'middle',
-    horizontal: 'right',
+    horizontal: 'center',
     readingOrder: 'rtl',
     wrapText: true,
   }
-  row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEADER_FILL } }
+  row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: ACCENT_NAVY } }
   row.eachCell((cell) => {
-    cell.border = BOTTOM_BORDER
+    cell.border = FULL_BORDER
   })
 }
 
 function paintStatusRow(row: import('exceljs').Row, status: PensionStatus) {
+  // Row 2 is the header, so body rows start at 3 — that's "even" in row.number
+  // terms. Use the row index parity so the first body row is white.
+  const stripe = row.number % 2 === 1 ? 'FFFFFFFF' : BAND_ALT
   row.alignment = { vertical: 'middle', horizontal: 'right', readingOrder: 'rtl', wrapText: true }
   row.font = { name: 'Calibri', size: 11, color: { argb: BODY_TEXT } }
   row.eachCell((cell) => {
-    cell.border = BOTTOM_BORDER
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: stripe } }
+    cell.border = FULL_BORDER
   })
-  // Status column is index 12 in AGENT_COLUMNS — colored bold text, no fill.
+  // Status column is index 12 in AGENT_COLUMNS — pastel fill + bold colored text.
   const statusCell = row.getCell(12)
+  statusCell.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: STATUS_HEADER_FILL[status] },
+  }
   statusCell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: STATUS_TAB_COLORS[status] } }
 }
 
 function paintActiveFundsRow(row: import('exceljs').Row) {
+  const stripe = row.number % 2 === 1 ? 'FFFFFFFF' : BAND_ALT
   row.alignment = { vertical: 'middle', horizontal: 'right', readingOrder: 'rtl', wrapText: true }
   row.font = { name: 'Calibri', size: 11, color: { argb: BODY_TEXT } }
   row.eachCell((cell) => {
-    cell.border = BOTTOM_BORDER
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: stripe } }
+    cell.border = FULL_BORDER
   })
-  // Highlight the fund-name column (index 7) with bold, no fill.
+  // Fund-name column (index 7) — bold navy text to draw the eye.
   const fundCell = row.getCell(7)
-  fundCell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: BODY_TEXT } }
+  fundCell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: ACCENT_NAVY } }
 }
 
-const BOTTOM_BORDER: import('exceljs').Borders = {
-  bottom: { style: 'thin', color: { argb: ROW_BORDER_COLOR } },
+const FULL_BORDER: import('exceljs').Borders = {
+  top: { style: 'thin', color: { argb: GRID_BORDER } },
+  bottom: { style: 'thin', color: { argb: GRID_BORDER } },
+  left: { style: 'thin', color: { argb: GRID_BORDER } },
+  right: { style: 'thin', color: { argb: GRID_BORDER } },
 } as unknown as import('exceljs').Borders
 
 function columnLetter(index: number): string {
