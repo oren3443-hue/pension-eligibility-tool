@@ -6,6 +6,7 @@ export function analyzePensionStatus(
   employees: EmployeeRecord[],
   coverages: CoverageRecord[],
   reportMonthValue: string,
+  grossSalaryByEmployee: Record<string, number> = {},
 ): PensionStatusRow[] {
   const reportMonth = parseMonthInput(reportMonthValue)
   const coverageByEmployee = groupCoverageByEmployee(coverages)
@@ -17,7 +18,17 @@ export function analyzePensionStatus(
     }
 
     const employeeCoverages = coverageByEmployee.get(employee.employeeId) ?? []
-    rows.push(buildEmployeeStatus(employee, employeeCoverages, reportMonth))
+    const grossSalary = grossSalaryByEmployee[employee.employeeId]
+    rows.push(
+      buildEmployeeStatus(
+        employee,
+        employeeCoverages,
+        reportMonth,
+        typeof grossSalary === 'number' && Number.isFinite(grossSalary) && grossSalary > 0
+          ? grossSalary
+          : null,
+      ),
+    )
   }
 
   return rows
@@ -169,13 +180,14 @@ function buildEmployeeStatus(
   employee: EmployeeRecord,
   coverages: CoverageRecord[],
   reportMonth: Date,
+  grossSalary: number | null,
 ): PensionStatusRow {
   const seventhMonth = employee.startDate ? addMonths(startOfMonth(employee.startDate), 6) : null
   const genderCode = resolveGender(employee.gender)
   const ageEligibilityMonth = getAgeEligibilityMonth(employee.birthDate, genderCode)
   const eligibilityMonth = maxDate(seventhMonth, ageEligibilityMonth)
   const coverage = summarizeCoverage(employee, coverages)
-  const base = baseRow(employee, eligibilityMonth, seventhMonth, ageEligibilityMonth, coverage, reportMonth)
+  const base = baseRow(employee, eligibilityMonth, seventhMonth, ageEligibilityMonth, coverage, reportMonth, grossSalary)
 
   if (coverage.kind !== 'none') {
     return {
@@ -261,6 +273,7 @@ function baseRow(
   ageEligibilityMonth: Date | null,
   coverage: ReturnType<typeof summarizeCoverage>,
   reportMonth: Date,
+  grossSalary: number | null,
 ): PensionStatusRow {
   return {
     employeeId: employee.employeeId,
@@ -287,6 +300,7 @@ function baseRow(
     fundLabels: [],
     primaryFund: 'ללא קופה',
     hasIdMismatch: coverage.idMismatch,
+    grossSalary,
   }
 }
 

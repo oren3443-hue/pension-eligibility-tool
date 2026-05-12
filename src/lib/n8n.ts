@@ -1,10 +1,17 @@
 import type { PensionStatusRow } from '../types'
+import type { AgentExportSummary } from './export'
 import { buildWebhookUrl, parseSendKey } from './sendKey'
 import { formatMonth } from './pension'
 
+// Webhook routing — kept as code constants so the user only enters the
+// shared secret in the UI, not the env name or paths.
 const DEFAULT_N8N_BASE_URL =
   (import.meta as unknown as { env?: { VITE_N8N_BASE_URL?: string } }).env?.VITE_N8N_BASE_URL ??
   'https://orenmeshi.app.n8n.cloud/webhook'
+
+const SOURCE_NAME = 'orenmeshi'
+const WHATSAPP_WEBHOOK_PATH = 'pension-notify'
+const AGENT_EMAIL_WEBHOOK_PATH = 'pension-agent-email'
 
 const PAYROLL_EMAIL = 'payroll@orenmeshi.com'
 
@@ -111,14 +118,14 @@ export interface TestSendOptions {
   sendKey: string
   reportMonth: string
   testPhone: string
-  templates: { label: string; text: string }[]
+  templateText: string
   deadlineOverride?: string
 }
 
 export async function sendTestMessages(options: TestSendOptions): Promise<void> {
   const parsedKey = parseSendKey(options.sendKey)
   if (!parsedKey) {
-    throw new Error('מפתח השליחה לא תקין. הפורמט הנדרש: name=path=secret')
+    throw new Error('מפתח השליחה לא תקין. יש להזין סיקרט באורך 8 תווים לפחות.')
   }
 
   const phone = options.testPhone.trim()
@@ -126,13 +133,13 @@ export async function sendTestMessages(options: TestSendOptions): Promise<void> 
     throw new Error('צריך להזין מספר טלפון לבדיקה.')
   }
 
-  const url = buildWebhookUrl(DEFAULT_N8N_BASE_URL, parsedKey.urlPath)
+  const url = buildWebhookUrl(DEFAULT_N8N_BASE_URL, WHATSAPP_WEBHOOK_PATH)
   const sampleRow = buildSampleRow(phone, options.reportMonth)
+  const rendered = renderTemplate(options.templateText, sampleRow, options.deadlineOverride)
 
-  const employees = options.templates.map((tpl) => {
-    const rendered = renderTemplate(tpl.text, sampleRow, options.deadlineOverride)
-    return {
-      employeeId: `test-${tpl.label}`,
+  const employees = [
+    {
+      employeeId: 'test-pension',
       name: 'בדיקת טמפלייט',
       firstName: sampleRow.firstName,
       nationalId: sampleRow.nationalId,
@@ -140,8 +147,8 @@ export async function sendTestMessages(options: TestSendOptions): Promise<void> 
       eligibilityMonth: sampleRow.eligibilityMonth ? formatMonth(sampleRow.eligibilityMonth) : '',
       text: rendered,
       message: rendered,
-    }
-  })
+    },
+  ]
 
   const response = await fetch(url, {
     method: 'POST',
@@ -150,7 +157,7 @@ export async function sendTestMessages(options: TestSendOptions): Promise<void> 
       'X-Send-Key': parsedKey.secret,
     },
     body: JSON.stringify({
-      source: parsedKey.name,
+      source: SOURCE_NAME,
       reportMonth: options.reportMonth,
       sentAt: new Date().toISOString(),
       isTest: true,
@@ -202,16 +209,17 @@ function buildSampleRow(phone: string, reportMonth: string): PensionStatusRow {
     fundLabels: [],
     primaryFund: 'כלל פנסיה',
     hasIdMismatch: false,
+    grossSalary: null,
   }
 }
 
 export async function sendSelectedToN8n(options: WhatsAppSendOptions): Promise<SendResult> {
   const parsedKey = parseSendKey(options.sendKey)
   if (!parsedKey) {
-    throw new Error('מפתח השליחה לא תקין. הפורמט הנדרש: name=path=secret')
+    throw new Error('מפתח השליחה לא תקין. יש להזין סיקרט באורך 8 תווים לפחות.')
   }
 
-  const url = buildWebhookUrl(DEFAULT_N8N_BASE_URL, parsedKey.urlPath)
+  const url = buildWebhookUrl(DEFAULT_N8N_BASE_URL, WHATSAPP_WEBHOOK_PATH)
   const messages = buildRenderedMessages(options.rows, options.templateText, options.deadlineOverride)
 
   const response = await fetch(url, {
@@ -221,7 +229,7 @@ export async function sendSelectedToN8n(options: WhatsAppSendOptions): Promise<S
       'X-Send-Key': parsedKey.secret,
     },
     body: JSON.stringify({
-      source: parsedKey.name,
+      source: SOURCE_NAME,
       reportMonth: options.reportMonth,
       sentAt: new Date().toISOString(),
       employees: messages.map((message) => ({
@@ -253,3 +261,95 @@ export async function sendSelectedToN8n(options: WhatsAppSendOptions): Promise<S
 }
 
 export const PAYROLL_EMAIL_RENDERED = PAYROLL_EMAIL
+
+// --- Agent email via n8n + Outlook -----------------------------------------
+
+export interface AgentEmailSendOptions {
+  sendKey: string // separate sendKey for the agent-email webhook
+  agentEmail: string
+  reportMonth: string
+  fileBuffer: ArrayBuffer
+  fileName: string
+  summary: AgentExportSummary
+}
+
+export interface AgentEmailResult {
+  sent: boolean
+  messageId?: string
+  to?: string
+}
+
+// Encodes the binary workbook + metadata and POSTs it to a separate n8n
+// webhook. The n8n workflow is expected to decode `fileBase64` into a binary
+// item and forward it through Microsoft Outlook (Send Email) as an attachment.
+export async function sendAgentEmailViaN8n(
+  options: AgentEmailSendOptions,
+): Promise<AgentEmailResult> {
+  const parsedKey = parseSendKey(options.sendKey)
+  if (!parsedKey) {
+    throw new Error('מפתח השליחה לא תקין. יש להזין סיקרט באורך 8 תווים לפחות.')
+  }
+  const recipient = options.agentEmail.trim()
+  if (!recipient) {
+    throw new Error('יש להזין כתובת מייל של סוכן הפנסיה לפני שליחה.')
+  }
+
+  const url = buildWebhookUrl(DEFAULT_N8N_BASE_URL, AGENT_EMAIL_WEBHOOK_PATH)
+  const fileBase64 = arrayBufferToBase64(options.fileBuffer)
+  const subject = `דוח עובדים לטיפול — ${options.reportMonth}`
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Send-Key': parsedKey.secret,
+    },
+    body: JSON.stringify({
+      source: SOURCE_NAME,
+      reportMonth: options.reportMonth,
+      sentAt: new Date().toISOString(),
+      to: recipient,
+      subject,
+      fileName: options.fileName,
+      fileBase64,
+      summary: options.summary,
+    }),
+  })
+
+  if (!response.ok) {
+    let message = `שליחת המייל נכשלה (סטטוס ${response.status}).`
+    if (response.status === 404) {
+      message =
+        'ה-webhook של מייל הסוכן לא נמצא ב-n8n. ראה docs/n8n-agent-email-workflow.md.'
+    }
+    try {
+      const data = (await response.json()) as { message?: string; error?: string }
+      if (data.message) message = data.message
+      else if (data.error) message = data.error
+    } catch {
+      // keep generic message
+    }
+    throw new Error(message)
+  }
+
+  try {
+    const data = (await response.json()) as Partial<AgentEmailResult>
+    return { ...data, sent: true }
+  } catch {
+    return { sent: true }
+  }
+}
+
+// btoa() chokes on long strings (`String.fromCharCode(...veryLargeArray)`
+// throws "RangeError: Maximum call stack size exceeded"). Build the binary
+// string in chunks instead.
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize)
+    binary += String.fromCharCode.apply(null, Array.from(chunk))
+  }
+  return btoa(binary)
+}

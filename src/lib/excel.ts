@@ -2,6 +2,7 @@ import type {
   CoverageRecord,
   EmployeeRecord,
   ParsedUploadedFile,
+  RestigoWorkforceRecord,
   UploadedFileKind,
 } from '../types'
 
@@ -35,6 +36,19 @@ const GMAL_REQUIRED_HEADERS: readonly string[] = [
   'מספר זהות',
   'שם הקופה',
   'סוג קופה',
+] as const
+
+// "דוח מצבת כח אדם" — Restigo workforce composition (לבדיקת קופות פעילות).
+// Export path (Restigo): דוחות > מצבת כח אדם > ייצוא לאקסל.
+// Layout quirk: row 0 is a merged title cell, real headers live in row 1.
+// Required columns are the linking key (`מספר מיכפל`) plus the pension flag
+// columns we filter on.
+const RESTIGO_WORKFORCE_REQUIRED_HEADERS: readonly string[] = [
+  'שם עובד',
+  'מספר מיכפל',
+  'תאריך תחילת עבודה',
+  'קרן פנסיה',
+  'שם קרן פנסיה',
 ] as const
 
 // Maps `מספר מחלקה` from the Michpal export to human-readable names.
@@ -86,9 +100,10 @@ interface DetectionResult {
 
 interface SheetParse {
   sheetName: string
-  rows: RawSheetRows
+  rows: RawSheetRows // already shifted past any title row
   headers: string[]
   detection: DetectionResult
+  hadTitleRow: boolean
 }
 
 export async function parseUploadedFile(file: File): Promise<ParsedUploadedFile[]> {
@@ -102,20 +117,7 @@ export async function parseUploadedFile(file: File): Promise<ParsedUploadedFile[
   const sheetParses = collectSheetParses(workbook, xlsx)
 
   if (sheetParses.length === 0) {
-    return [
-      {
-        id: `${file.name}-${file.lastModified}`,
-        fileName: file.name,
-        kind: 'unknown',
-        candidateKind: null,
-        rowCount: 0,
-        headers: [],
-        missingHeaders: [],
-        issues: ['הקובץ ריק או שאין בו גיליון עם נתונים.'],
-        employees: [],
-        coverages: [],
-      },
-    ]
+    return [emptyParsedFile(file, 'הקובץ ריק או שאין בו גיליון עם נתונים.')]
   }
 
   const knownByKind = new Map<UploadedFileKind, SheetParse>()
@@ -126,7 +128,8 @@ export async function parseUploadedFile(file: File): Promise<ParsedUploadedFile[
       unknownSheets.push(sheet)
       continue
     }
-    if (!knownByKind.has(sheet.detection.kind)) {
+    const existing = knownByKind.get(sheet.detection.kind)
+    if (!existing || preferReplacement(sheet, existing)) {
       knownByKind.set(sheet.detection.kind, sheet)
     }
   }
@@ -137,6 +140,9 @@ export async function parseUploadedFile(file: File): Promise<ParsedUploadedFile[
     const issues: string[] = []
     if (sheetParses.length > 1) {
       issues.push(`מתוך הגיליון "${sheet.sheetName}" בקובץ ${file.name}.`)
+    }
+    if (sheet.hadTitleRow) {
+      issues.push(`דילגנו על שורת כותרת בקובץ — שורת ה-headers זוהתה אוטומטית.`)
     }
 
     const payload: ParsedUploadedFile = {
@@ -151,12 +157,17 @@ export async function parseUploadedFile(file: File): Promise<ParsedUploadedFile[
       issues,
       employees: [],
       coverages: [],
+      restigoWorkforce: [],
+      grossSalaryByEmployee: {},
     }
 
     if (kind === 'employee_data') {
       payload.employees = parseEmployeeDataRows(sheet.rows, xlsx)
     } else if (kind === 'gmal_report') {
       payload.coverages = parseCoverageRows(sheet.rows)
+      payload.grossSalaryByEmployee = computeGrossSalaryByEmployee(sheet.rows)
+    } else if (kind === 'restigo_workforce') {
+      payload.restigoWorkforce = parseRestigoWorkforceRows(sheet.rows, xlsx)
     }
 
     results.push(payload)
@@ -185,17 +196,41 @@ export async function parseUploadedFile(file: File): Promise<ParsedUploadedFile[
       issues,
       employees: [],
       coverages: [],
+      restigoWorkforce: [],
+      grossSalaryByEmployee: {},
     })
   }
 
   return results
 }
 
-export function kindLabel(kind: UploadedFileKind): string {
-  if (kind === 'employee_data') {
-    return 'נתוני עובד'
+function emptyParsedFile(file: File, issue: string): ParsedUploadedFile {
+  return {
+    id: `${file.name}-${file.lastModified}`,
+    fileName: file.name,
+    kind: 'unknown',
+    candidateKind: null,
+    rowCount: 0,
+    headers: [],
+    missingHeaders: [],
+    issues: [issue],
+    employees: [],
+    coverages: [],
+    restigoWorkforce: [],
+    grossSalaryByEmployee: {},
   }
+}
+
+export function kindLabel(kind: UploadedFileKind): string {
+  if (kind === 'employee_data') return 'נתוני עובד'
+  if (kind === 'restigo_workforce') return 'דוח מצבת כח אדם (רסטיגו)'
   return 'דוח גמל'
+}
+
+export function requiredHeadersFor(kind: UploadedFileKind): readonly string[] {
+  if (kind === 'employee_data') return EMPLOYEE_DATA_REQUIRED_HEADERS
+  if (kind === 'gmal_report') return GMAL_REQUIRED_HEADERS
+  return RESTIGO_WORKFORCE_REQUIRED_HEADERS
 }
 
 function collectSheetParses(workbook: XlsxWorkbook, xlsx: XlsxRuntime): SheetParse[] {
@@ -203,28 +238,67 @@ function collectSheetParses(workbook: XlsxWorkbook, xlsx: XlsxRuntime): SheetPar
   for (const sheetName of workbook.SheetNames) {
     const worksheet: XlsxWorksheet | undefined = workbook.Sheets[sheetName]
     if (!worksheet || !worksheet['!ref']) continue
-    const rows = xlsx.utils.sheet_to_json(worksheet, {
+    const rawRows = xlsx.utils.sheet_to_json(worksheet, {
       header: 1,
       raw: true,
       defval: '',
       blankrows: false,
     }) as RawSheetRows
-    if (rows.length === 0) continue
-    const [headerRow = []] = rows
+    if (rawRows.length === 0) continue
+
+    const { headerIndex, hadTitleRow } = locateHeaderRow(rawRows)
+    if (headerIndex < 0) continue
+
+    const rows = rawRows.slice(headerIndex)
+    const headerRow = rows[0] ?? []
     const headers = headerRow.map((cell) => normalizeText(cell))
     const detection = detectFileKind(headers)
-    parses.push({ sheetName, rows, headers, detection })
+    parses.push({ sheetName, rows, headers, detection, hadTitleRow })
   }
   return parses
+}
+
+// Some Hebrew exports (e.g., Restigo "מצבת כח אדם") put a merged title in
+// row 0 with one filled cell and many empties — the actual headers are in
+// row 1. Detect that pattern and skip the title.
+function locateHeaderRow(rows: RawSheetRows): { headerIndex: number; hadTitleRow: boolean } {
+  const first = rows[0] ?? []
+  const filledFirst = first.filter((cell) => normalizeText(cell) !== '').length
+  // Heuristic: if row 0 has only 1-2 filled cells and row 1 is much fuller,
+  // treat row 0 as a title and use row 1 as headers.
+  if (filledFirst <= 2 && rows.length > 1) {
+    const second = rows[1] ?? []
+    const filledSecond = second.filter((cell) => normalizeText(cell) !== '').length
+    if (filledSecond >= 5) {
+      return { headerIndex: 1, hadTitleRow: true }
+    }
+  }
+  return { headerIndex: 0, hadTitleRow: false }
+}
+
+function preferReplacement(candidate: SheetParse, existing: SheetParse): boolean {
+  if (candidate.detection.kind !== existing.detection.kind) return false
+  return candidate.rows.length > existing.rows.length
 }
 
 function detectFileKind(headers: string[]): DetectionResult {
   const employeeMatchCount = countMatchedHeaders(headers, EMPLOYEE_DATA_REQUIRED_HEADERS)
   const gmalMatchCount = countMatchedHeaders(headers, GMAL_REQUIRED_HEADERS)
+  const restigoMatchCount = countMatchedHeaders(headers, RESTIGO_WORKFORCE_REQUIRED_HEADERS)
   const hasFullEmployeeMatch = employeeMatchCount === EMPLOYEE_DATA_REQUIRED_HEADERS.length
   const hasFullGmalMatch = gmalMatchCount === GMAL_REQUIRED_HEADERS.length
+  const hasFullRestigoMatch = restigoMatchCount === RESTIGO_WORKFORCE_REQUIRED_HEADERS.length
 
-  // The gmal report includes "מספר עובד" + "מספר זהות" too — distinguishing column is "שם הקופה" / "סוג קופה".
+  // Restigo workforce has the unique columns "קרן פנסיה" + "שם קרן פנסיה" —
+  // the safest signal that it's not the gmal/employee report.
+  if (hasFullRestigoMatch) {
+    return {
+      kind: 'restigo_workforce',
+      candidateKind: 'restigo_workforce',
+      missingHeaders: [],
+    }
+  }
+
   if (hasFullGmalMatch) {
     return { kind: 'gmal_report', candidateKind: 'gmal_report', missingHeaders: [] }
   }
@@ -236,6 +310,11 @@ function detectFileKind(headers: string[]): DetectionResult {
   const ranked: Array<{ kind: UploadedFileKind; count: number; required: readonly string[] }> = [
     { kind: 'employee_data', count: employeeMatchCount, required: EMPLOYEE_DATA_REQUIRED_HEADERS },
     { kind: 'gmal_report', count: gmalMatchCount, required: GMAL_REQUIRED_HEADERS },
+    {
+      kind: 'restigo_workforce',
+      count: restigoMatchCount,
+      required: RESTIGO_WORKFORCE_REQUIRED_HEADERS,
+    },
   ]
   ranked.sort((a, b) => b.count - a.count)
   const best = ranked[0]
@@ -301,6 +380,61 @@ function parseEmployeeDataRows(rows: RawSheetRows, xlsx: XlsxRuntime): EmployeeR
   return employees
 }
 
+function parseRestigoWorkforceRows(
+  rows: RawSheetRows,
+  xlsx: XlsxRuntime,
+): RestigoWorkforceRecord[] {
+  const headerRow = rows[0] ?? []
+  const headerIndex = createHeaderIndex(headerRow)
+  const records: RestigoWorkforceRecord[] = []
+
+  const nameIdx =
+    headerIndex.get(canonicalizeHeader('שם עובד')) ??
+    headerIndex.get(canonicalizeHeader('שם העובד')) ??
+    headerIndex.get(canonicalizeHeader('שם מלא'))
+  const restigoIdIdx = headerIndex.get(canonicalizeHeader('מספר עובד'))
+  const michpalIdIdx =
+    headerIndex.get(canonicalizeHeader('מספר מיכפל')) ??
+    headerIndex.get(canonicalizeHeader('מספר עובד במערכת שכר'))
+  const nationalIdIdx =
+    headerIndex.get(canonicalizeHeader('ת.ז / דרכון')) ??
+    headerIndex.get(canonicalizeHeader('ת.ז/דרכון'))
+  const branchIdx = headerIndex.get(canonicalizeHeader('סניף'))
+  const salaryIdx = headerIndex.get(canonicalizeHeader('משכורת'))
+  const startDateIdx = headerIndex.get(canonicalizeHeader('תאריך תחילת עבודה'))
+  const form101Idx = headerIndex.get(canonicalizeHeader('טופס 101'))
+  const fundIndicatorIdx = headerIndex.get(canonicalizeHeader('קרן פנסיה'))
+  const fundNameIdx = headerIndex.get(canonicalizeHeader('שם קרן פנסיה'))
+
+  function lookup(row: unknown[], idx: number | undefined): unknown {
+    return typeof idx === 'number' ? row[idx] : ''
+  }
+
+  for (const row of rows.slice(1)) {
+    const restigoId = normalizeIdentifier(lookup(row, restigoIdIdx))
+    const name = normalizeText(lookup(row, nameIdx))
+    if (!restigoId && !name) continue
+
+    const michpalIdRaw = normalizeIdentifier(lookup(row, michpalIdIdx))
+    const michpalId = michpalIdRaw === '0' ? '' : michpalIdRaw
+
+    records.push({
+      restigoId,
+      michpalId,
+      nationalId: normalizeIdentifier(lookup(row, nationalIdIdx)),
+      name,
+      branch: normalizeText(lookup(row, branchIdx)),
+      salary: normalizeText(lookup(row, salaryIdx)),
+      startDate: parseExcelDate(lookup(row, startDateIdx), xlsx),
+      form101Status: normalizeText(lookup(row, form101Idx)),
+      fundIndicator: normalizeText(lookup(row, fundIndicatorIdx)),
+      fundName: normalizeText(lookup(row, fundNameIdx)),
+    })
+  }
+
+  return records
+}
+
 function parseCoverageRows(rows: RawSheetRows): CoverageRecord[] {
   const headerIndex = createHeaderIndex(rows[0] ?? [])
   const coverages: CoverageRecord[] = []
@@ -333,6 +467,46 @@ function parseCoverageRows(rows: RawSheetRows): CoverageRecord[] {
   }
 
   return coverages
+}
+
+// Compute gross salary per employee from the gmal "הרכב שכר וגמל" report.
+// Each row is one (employee, salary-component, fund) tuple. We sum the cash
+// amount (`סכום נדרש`) plus the in-kind value (`שווי נדרש`) on rows where
+// `שם רכיב שכר` is filled — those are real salary lines, not pure
+// fund-membership rows. Fund-only rows (empty component) are skipped.
+export function computeGrossSalaryByEmployee(rows: RawSheetRows): Record<string, number> {
+  const headerIndex = createHeaderIndex(rows[0] ?? [])
+  const result: Record<string, number> = {}
+
+  const empIdx = headerIndex.get(canonicalizeHeader('מספר עובד'))
+  const compIdx = headerIndex.get(canonicalizeHeader('שם רכיב שכר'))
+  const sumIdx = headerIndex.get(canonicalizeHeader('סכום נדרש'))
+  const valueIdx = headerIndex.get(canonicalizeHeader('שווי נדרש'))
+  if (empIdx === undefined || compIdx === undefined) return result
+
+  for (const row of rows.slice(1)) {
+    const employeeId = normalizeIdentifier(row[empIdx])
+    if (!employeeId) continue
+    const component = normalizeText(row[compIdx])
+    if (!component) continue
+    const cash = sumIdx !== undefined ? toFiniteNumber(row[sumIdx]) : 0
+    const inkind = valueIdx !== undefined ? toFiniteNumber(row[valueIdx]) : 0
+    const total = cash + inkind
+    if (total === 0) continue
+    result[employeeId] = (result[employeeId] ?? 0) + total
+  }
+
+  return result
+}
+
+function toFiniteNumber(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const cleaned = value.replace(/[₪,\s]/g, '')
+    const parsed = Number.parseFloat(cleaned)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  return 0
 }
 
 function countMatchedHeaders(
