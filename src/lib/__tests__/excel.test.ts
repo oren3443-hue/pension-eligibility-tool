@@ -16,7 +16,7 @@ function header(extra: string[] = []) {
 }
 
 describe('computeGrossSalaryByEmployee', () => {
-  it('sums cash + in-kind components per employee', () => {
+  it('sums סכום נדרש across all salary-component rows per employee', () => {
     const rows = [
       header(),
       ['192', 'דוגמה', 'משכורת', 20977, ''],
@@ -25,7 +25,7 @@ describe('computeGrossSalaryByEmployee', () => {
       ['192', 'דוגמה', 'שווי פלאפו', '', 20],
     ]
     const result = computeGrossSalaryByEmployee(rows)
-    expect(result['192']).toBe(20977 + 18300 + 300 + 20)
+    expect(result['192']).toBe(20977 + 18300 + 300)
   })
 
   it('skips fund-only rows (no salary component)', () => {
@@ -40,11 +40,12 @@ describe('computeGrossSalaryByEmployee', () => {
     expect(result['3']).toBe(5000)
   })
 
-  it('skips rows where both numbers are zero/missing even with component', () => {
+  it('skips rows with no סכום נדרש (in-kind only)', () => {
     const rows = [
       header(),
       ['9', 'אפס', 'משכורת', 0, 0],
       ['9', 'אפס', 'בונוס', '', ''],
+      ['9', 'אפס', 'שווי ארוחות', '', 249],
       ['9', 'אפס', 'נסיעות', 100, ''],
     ]
     const result = computeGrossSalaryByEmployee(rows)
