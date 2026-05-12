@@ -474,6 +474,20 @@ function parseCoverageRows(rows: RawSheetRows): CoverageRecord[] {
 // amount (`סכום נדרש`) plus the in-kind value (`שווי נדרש`) on rows where
 // `שם רכיב שכר` is filled — those are real salary lines, not pure
 // fund-membership rows. Fund-only rows (empty component) are skipped.
+// Reimbursements/allowances that appear in the gemel report but are NOT part
+// of שכר ברוטו (taxable gross pay): travel refunds, per-diem, employer-side
+// pension contributions shown as in-kind income.
+const NON_SALARY_COMPONENTS = new Set(['נסיעות', 'אשל', 'אש"ל', 'אש״ל'])
+const NON_SALARY_PREFIXES = ['החזר', 'לגמל']
+
+function isSalaryComponent(component: string): boolean {
+  if (NON_SALARY_COMPONENTS.has(component)) return false
+  for (const prefix of NON_SALARY_PREFIXES) {
+    if (component.startsWith(prefix)) return false
+  }
+  return true
+}
+
 export function computeGrossSalaryByEmployee(rows: RawSheetRows): Record<string, number> {
   const headerIndex = createHeaderIndex(rows[0] ?? [])
   const result: Record<string, number> = {}
@@ -489,6 +503,7 @@ export function computeGrossSalaryByEmployee(rows: RawSheetRows): Record<string,
     if (!employeeId) continue
     const component = normalizeText(row[compIdx])
     if (!component) continue
+    if (!isSalaryComponent(component)) continue
     const cash = sumIdx !== undefined ? toFiniteNumber(row[sumIdx]) : 0
     const inkind = valueIdx !== undefined ? toFiniteNumber(row[valueIdx]) : 0
     const total = cash + inkind
