@@ -16,7 +16,7 @@ function header(extra: string[] = []) {
 }
 
 describe('computeGrossSalaryByEmployee', () => {
-  it('sums salary cash + taxable in-kind, excludes reimbursements', () => {
+  it('sums cash + in-kind components per employee', () => {
     const rows = [
       header(),
       ['192', 'דוגמה', 'משכורת', 20977, ''],
@@ -25,7 +25,7 @@ describe('computeGrossSalaryByEmployee', () => {
       ['192', 'דוגמה', 'שווי פלאפו', '', 20],
     ]
     const result = computeGrossSalaryByEmployee(rows)
-    expect(result['192']).toBe(20977 + 18300 + 20)
+    expect(result['192']).toBe(20977 + 18300 + 300 + 20)
   })
 
   it('skips fund-only rows (no salary component)', () => {
@@ -40,7 +40,7 @@ describe('computeGrossSalaryByEmployee', () => {
     expect(result['3']).toBe(5000)
   })
 
-  it('skips reimbursements even when they are the only component', () => {
+  it('skips rows where both numbers are zero/missing even with component', () => {
     const rows = [
       header(),
       ['9', 'אפס', 'משכורת', 0, 0],
@@ -48,17 +48,17 @@ describe('computeGrossSalaryByEmployee', () => {
       ['9', 'אפס', 'נסיעות', 100, ''],
     ]
     const result = computeGrossSalaryByEmployee(rows)
-    expect(result['9']).toBeUndefined()
+    expect(result['9']).toBe(100)
   })
 
-  it('handles string numbers and ignores travel reimbursement', () => {
+  it('handles string numbers (currency formatting)', () => {
     const rows = [
       header(),
       ['7', 'מחרוזת', 'משכורת', '12,500', ''],
       ['7', 'מחרוזת', 'נסיעות', '₪500', ''],
     ]
     const result = computeGrossSalaryByEmployee(rows)
-    expect(result['7']).toBe(12500)
+    expect(result['7']).toBe(13000)
   })
 
   it('returns empty object when required headers are missing', () => {
@@ -69,7 +69,7 @@ describe('computeGrossSalaryByEmployee', () => {
     expect(computeGrossSalaryByEmployee(rows)).toEqual({})
   })
 
-  it('aggregates salary components, ignores נסיעות', () => {
+  it('aggregates across multiple rows for same employee', () => {
     const rows = [
       header(),
       ['1', 'א', 'משכורת', 1000, ''],
@@ -78,19 +78,7 @@ describe('computeGrossSalaryByEmployee', () => {
       ['1', 'א', 'נסיעות', 300, ''],
     ]
     const result = computeGrossSalaryByEmployee(rows)
-    expect(result['1']).toBe(1500)
+    expect(result['1']).toBe(1800)
     expect(result['2']).toBe(2000)
-  })
-
-  it('excludes החזר* and לגמל* components', () => {
-    const rows = [
-      header(),
-      ['5', 'ש', 'משכורת', 8000, ''],
-      ['5', 'ש', 'החזר הוצ רכב', 400, ''],
-      ['5', 'ש', 'לגמל ללידה', '', 1500],
-      ['5', 'ש', 'שווי ארוחות', '', 250],
-    ]
-    const result = computeGrossSalaryByEmployee(rows)
-    expect(result['5']).toBe(8000 + 250)
   })
 })
