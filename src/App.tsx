@@ -74,10 +74,10 @@ type SlotKey = 'employee' | 'gmal' | 'restigo'
 const EMPLOYEE_STATE_STORAGE_KEY = 'pension-status-employee-state-v2'
 const SETTINGS_STORAGE_KEY = 'pension-status-settings-v4'
 
-// The single approved WhatsApp template — `pension_agent_contact_v2`. The
+// The single approved WhatsApp template — `pension_agent_intro_v1`. The
 // 3-template design (א/ב/ג) was simplified to one nudge: the agent will
-// reach out, and the employee can also pick a fund themselves before the
-// deadline. Any change to this text requires re-approval at Meta.
+// reach out (no self-choose paragraph, no deadline). Any change to this
+// text requires re-approval at Meta — see docs/whatsapp-templates.md.
 const PENSION_TEMPLATE = `שלום {{first_name}},
 
 בשעה טובה! החל מחודש העבודה {{eligibility_month}} מתחילות ההפרשות הפנסיוניות שלך.
