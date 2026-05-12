@@ -481,19 +481,16 @@ export function computeGrossSalaryByEmployee(rows: RawSheetRows): Record<string,
   const empIdx = headerIndex.get(canonicalizeHeader('מספר עובד'))
   const compIdx = headerIndex.get(canonicalizeHeader('שם רכיב שכר'))
   const sumIdx = headerIndex.get(canonicalizeHeader('סכום נדרש'))
-  const valueIdx = headerIndex.get(canonicalizeHeader('שווי נדרש'))
-  if (empIdx === undefined || compIdx === undefined) return result
+  if (empIdx === undefined || compIdx === undefined || sumIdx === undefined) return result
 
   for (const row of rows.slice(1)) {
     const employeeId = normalizeIdentifier(row[empIdx])
     if (!employeeId) continue
     const component = normalizeText(row[compIdx])
     if (!component) continue
-    const cash = sumIdx !== undefined ? toFiniteNumber(row[sumIdx]) : 0
-    const inkind = valueIdx !== undefined ? toFiniteNumber(row[valueIdx]) : 0
-    const total = cash + inkind
-    if (total === 0) continue
-    result[employeeId] = (result[employeeId] ?? 0) + total
+    const cash = toFiniteNumber(row[sumIdx])
+    if (cash === 0) continue
+    result[employeeId] = (result[employeeId] ?? 0) + cash
   }
 
   return result
