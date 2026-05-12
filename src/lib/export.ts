@@ -28,14 +28,6 @@ export async function exportRowsToWorkbook(
   await triggerWorkbookDownload(buffer, fileName)
 }
 
-const STATUS_TAB_ORDER: PensionStatus[] = [
-  'באיחור',
-  'זכאי החודש',
-  'טרם זכאי',
-  'יש קופה',
-  'חסר נתונים',
-]
-
 const STATUS_TAB_COLORS: Record<PensionStatus, string> = {
   'באיחור': 'FFC54C38',
   'זכאי החודש': 'FFDB7B21',
@@ -131,6 +123,7 @@ const ACTIVE_FUND_COLUMNS: ActiveFundColumn[] = [
 export interface AgentExportSummary {
   total: number
   perStatus: Record<PensionStatus, number>
+  needFundCount: number
   activeFundsCount: number
   totalGrossSalary: number
   averageGrossSalary: number | null
@@ -155,13 +148,12 @@ export async function exportAgentWorkbook(
   workbook.views = [{ rightToLeft: true } as unknown as never]
 
   const filteredRows = rows.map((row) => row)
-  // For "יש קופה" sheet specifically, only include rows with a real fund name.
-  const coveredRowsFiltered = filteredRows.filter(
+
+  const needFundRows = filteredRows.filter(
     (row) =>
-      row.status === 'יש קופה' &&
-      row.primaryFund &&
-      row.primaryFund.trim() !== '' &&
-      row.primaryFund.trim() !== 'ללא קופה',
+      row.status === 'באיחור' ||
+      row.status === 'זכאי החודש' ||
+      row.status === 'טרם זכאי',
   )
 
   const summary: AgentExportSummary = {
@@ -173,6 +165,7 @@ export async function exportAgentWorkbook(
       'יש קופה': 0,
       'חסר נתונים': 0,
     },
+    needFundCount: needFundRows.length,
     activeFundsCount: activeFundsForReview.length,
     totalGrossSalary: 0,
     averageGrossSalary: null,
@@ -182,7 +175,7 @@ export async function exportAgentWorkbook(
   }
   for (const row of filteredRows) {
     if (row.status === 'יש קופה') {
-      // For the summary count we use the same "real text" filter as the sheet.
+      // "יש קופה" only counts rows that actually name a real fund.
       if (
         row.primaryFund &&
         row.primaryFund.trim() !== '' &&
@@ -205,16 +198,8 @@ export async function exportAgentWorkbook(
   summary.totalGrossSalary = salarySum
   summary.averageGrossSalary = salaryCount > 0 ? salarySum / salaryCount : null
 
-  buildSummarySheet(workbook, meta, summary)
-  buildAllSheet(workbook, filteredRows)
-
-  for (const status of STATUS_TAB_ORDER) {
-    const statusRows =
-      status === 'יש קופה'
-        ? coveredRowsFiltered
-        : filteredRows.filter((row) => row.status === status)
-    if (statusRows.length === 0) continue
-    buildStatusSheet(workbook, status, statusRows)
+  if (needFundRows.length > 0) {
+    buildNeedFundSheet(workbook, needFundRows)
   }
 
   if (activeFundsForReview.length > 0) {
@@ -225,139 +210,20 @@ export async function exportAgentWorkbook(
   return { buffer, summary }
 }
 
-function buildSummarySheet(
+function buildNeedFundSheet(
   workbook: import('exceljs').Workbook,
-  meta: { reportMonth: string; generatedAt: Date },
-  summary: AgentExportSummary,
+  rows: PensionStatusRow[],
 ) {
-  const sheet = workbook.addWorksheet('סיכום', {
-    views: [{ rightToLeft: true, showGridLines: false }],
-    properties: { tabColor: { argb: 'FF14212B' } },
-  })
-
-  sheet.mergeCells('A1:D1')
-  const titleCell = sheet.getCell('A1')
-  titleCell.value = `דוח סוכן פנסיה — חודש ${meta.reportMonth}`
-  titleCell.font = { name: 'Calibri', size: 18, bold: true, color: { argb: 'FFFFFFFF' } }
-  titleCell.alignment = { horizontal: 'center', vertical: 'middle', readingOrder: 'rtl' }
-  titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF14212B' } }
-  sheet.getRow(1).height = 36
-
-  sheet.getCell('A3').value = 'הופק בתאריך:'
-  sheet.getCell('B3').value = formatDate(meta.generatedAt)
-  sheet.getCell('A4').value = 'סה״כ עובדים בדוח:'
-  sheet.getCell('B4').value = summary.total
-  sheet.getCell('A5').value = 'לבדיקת קופות פעילות (רסטיגו):'
-  sheet.getCell('B5').value = summary.activeFundsCount
-
-  for (const cellRef of ['A3', 'A4', 'A5']) {
-    const cell = sheet.getCell(cellRef)
-    cell.font = { bold: true, color: { argb: 'FF14212B' } }
-    cell.alignment = { horizontal: 'right', readingOrder: 'rtl' }
-  }
-  for (const cellRef of ['B3', 'B4', 'B5']) {
-    sheet.getCell(cellRef).alignment = { horizontal: 'right', readingOrder: 'rtl' }
-  }
-
-  sheet.getRow(7).values = ['סטטוס', 'מספר עובדים']
-  styleHeaderRow(sheet.getRow(7), 'FFE2E8F0', 'FF14212B')
-
-  let rowIndex = 8
-  for (const status of STATUS_TAB_ORDER) {
-    const count = summary.perStatus[status] ?? 0
-    sheet.getCell(`A${rowIndex}`).value = status
-    sheet.getCell(`B${rowIndex}`).value = count
-    sheet.getCell(`A${rowIndex}`).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: STATUS_HEADER_FILL[status] },
-    }
-    sheet.getCell(`A${rowIndex}`).font = { bold: true, color: { argb: STATUS_TAB_COLORS[status] } }
-    sheet.getCell(`A${rowIndex}`).alignment = { horizontal: 'right', readingOrder: 'rtl' }
-    sheet.getCell(`B${rowIndex}`).alignment = { horizontal: 'right' }
-    sheet.getCell(`A${rowIndex}`).border = THIN_BORDER
-    sheet.getCell(`B${rowIndex}`).border = THIN_BORDER
-    rowIndex++
-  }
-
-  // Salary block
-  rowIndex++
-  sheet.getCell(`A${rowIndex}`).value = 'סה״כ שכר ברוטו (סכום):'
-  sheet.getCell(`B${rowIndex}`).value = summary.totalGrossSalary
-  sheet.getCell(`B${rowIndex}`).numFmt = '#,##0 "₪"'
-  styleStatLine(sheet.getCell(`A${rowIndex}`), sheet.getCell(`B${rowIndex}`))
-  rowIndex++
-  sheet.getCell(`A${rowIndex}`).value = 'שכר ברוטו ממוצע:'
-  sheet.getCell(`B${rowIndex}`).value =
-    summary.averageGrossSalary !== null ? Math.round(summary.averageGrossSalary) : '—'
-  sheet.getCell(`B${rowIndex}`).numFmt = '#,##0 "₪"'
-  styleStatLine(sheet.getCell(`A${rowIndex}`), sheet.getCell(`B${rowIndex}`))
-
-  // Active fund names list
-  if (summary.uniqueActiveFundNames.length > 0) {
-    rowIndex += 2
-    sheet.getCell(`A${rowIndex}`).value = 'קופות שדווחו כפעילות (רסטיגו):'
-    sheet.getCell(`A${rowIndex}`).font = { bold: true, color: { argb: 'FF14212B' } }
-    sheet.getCell(`A${rowIndex}`).alignment = { horizontal: 'right', readingOrder: 'rtl' }
-    rowIndex++
-    sheet.mergeCells(`A${rowIndex}:D${rowIndex}`)
-    sheet.getCell(`A${rowIndex}`).value = summary.uniqueActiveFundNames.join(' · ')
-    sheet.getCell(`A${rowIndex}`).alignment = {
-      horizontal: 'right',
-      readingOrder: 'rtl',
-      wrapText: true,
-    }
-    sheet.getRow(rowIndex).height = 28
-  }
-
-  sheet.getColumn(1).width = 28
-  sheet.getColumn(2).width = 18
-  sheet.getColumn(3).width = 12
-  sheet.getColumn(4).width = 12
-}
-
-function styleStatLine(label: import('exceljs').Cell, value: import('exceljs').Cell) {
-  label.font = { bold: true, color: { argb: 'FF14212B' } }
-  label.alignment = { horizontal: 'right', readingOrder: 'rtl' }
-  value.alignment = { horizontal: 'right' }
-  label.border = THIN_BORDER
-  value.border = THIN_BORDER
-}
-
-function buildAllSheet(workbook: import('exceljs').Workbook, rows: PensionStatusRow[]) {
-  const sheet = workbook.addWorksheet('כל העובדים', {
+  const sheet = workbook.addWorksheet('עובדים לפתיחת קופה', {
     views: [{ rightToLeft: true, state: 'frozen', ySplit: 2, showGridLines: false }],
-    properties: { tabColor: { argb: 'FF204F7B' } },
+    properties: { tabColor: { argb: STATUS_TAB_COLORS['זכאי החודש'] } },
   })
 
   prependSheetNote(sheet, DEFAULT_SHEET_NOTE, AGENT_COLUMNS.length)
-  applyAgentColumnsHeaderRow(sheet, 'FF204F7B', 'FFFFFFFF')
+  applyAgentColumnsHeaderRow(sheet, STATUS_TAB_COLORS['זכאי החודש'], 'FFFFFFFF')
 
   for (const row of rows) {
     appendAgentRow(sheet, row, row.status)
-  }
-
-  sheet.autoFilter = {
-    from: { row: 2, column: 1 },
-    to: { row: 2, column: AGENT_COLUMNS.length },
-  }
-}
-
-function buildStatusSheet(
-  workbook: import('exceljs').Workbook,
-  status: PensionStatus,
-  rows: PensionStatusRow[],
-) {
-  const sheet = workbook.addWorksheet(status, {
-    views: [{ rightToLeft: true, state: 'frozen', ySplit: 2, showGridLines: false }],
-    properties: { tabColor: { argb: STATUS_TAB_COLORS[status] } },
-  })
-
-  prependSheetNote(sheet, DEFAULT_SHEET_NOTE, AGENT_COLUMNS.length)
-  applyAgentColumnsHeaderRow(sheet, STATUS_TAB_COLORS[status], 'FFFFFFFF')
-
-  for (const row of rows) {
-    appendAgentRow(sheet, row, status)
   }
 
   sheet.autoFilter = {

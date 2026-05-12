@@ -1600,16 +1600,14 @@ function parseMonthValue(value: string): Date {
 }
 
 function countTabsLabel(summary: AgentExportSummary): string {
-  const statusTabs = (Object.entries(summary.perStatus) as [PensionStatus, number][])
-    .filter(([, count]) => count > 0)
-    .map(([status]) => status)
-  const extras: string[] = []
-  if (summary.activeFundsCount > 0) {
-    extras.push(`בדיקת קופות פעילות (${summary.activeFundsCount})`)
+  const tabs: string[] = []
+  if (summary.needFundCount > 0) {
+    tabs.push(`עובדים לפתיחת קופה (${summary.needFundCount})`)
   }
-  const totalTabs = statusTabs.length + 2 + extras.length
-  const labelParts = ['סיכום', 'כל העובדים', ...statusTabs, ...extras]
-  return `${totalTabs} לשוניות (${labelParts.join(', ')})`
+  if (summary.activeFundsCount > 0) {
+    tabs.push(`בדיקת קופות פעילות (${summary.activeFundsCount})`)
+  }
+  return `${tabs.length} לשוניות (${tabs.join(', ')})`
 }
 
 function buildFullExportRow(row: PensionStatusRow, _actionState: EmployeeActionState | undefined) {
