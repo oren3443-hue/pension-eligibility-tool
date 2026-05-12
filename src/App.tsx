@@ -78,14 +78,17 @@ const SETTINGS_STORAGE_KEY = 'pension-status-settings-v4'
 // 3-template design (א/ב/ג) was simplified to one nudge: the agent will
 // reach out (no self-choose paragraph, no deadline). Any change to this
 // text requires re-approval at Meta — see docs/whatsapp-templates.md.
-const PENSION_TEMPLATE = `שלום {{first_name}},
+const PENSION_TEMPLATE = `שלום {{first_name}} 👋
 
-בשעה טובה! החל מחודש העבודה {{eligibility_month}} מתחילות ההפרשות הפנסיוניות שלך.
+בשעה טובה! החל מחודש העבודה {{eligibility_month}} יתחילו עבורך ההפרשות הפנסיוניות 💰
 
-כדי לעזור לך לבחור את המסלול הכי נכון עבורך, סוכן הפנסיה שלנו יצור איתך קשר בקרוב. כמובן שתמיד עומדת לרשותך הזכות לבחור בכל סוכן או קופה אחרת שתעדיף.
+כדי לסייע לך לבחור את המסלול המתאים ביותר עבורך, סוכן הפנסיה שלנו ייצור איתך קשר בקרוב 📞
+
+חשוב לנו לציין כי עומדת לרשותך הזכות לבחור בכל סוכן פנסיוני, קרן או קופה אחרת לפי העדפתך.
 
 בהצלחה,
-מחלקת שכר, אורן משי 🩵`
+מחלקת שכר
+אורן משי 🩵`
 
 const SLOT_GUIDES: Record<SlotKey, {
   title: string
