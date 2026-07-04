@@ -142,7 +142,6 @@ export async function sendTestMessages(options: TestSendOptions): Promise<void> 
       employeeId: 'test-pension',
       name: 'בדיקת טמפלייט',
       firstName: sampleRow.firstName,
-      nationalId: sampleRow.nationalId,
       phone,
       eligibilityMonth: sampleRow.eligibilityMonth ? formatMonth(sampleRow.eligibilityMonth) : '',
       text: rendered,
@@ -232,11 +231,13 @@ export async function sendSelectedToN8n(options: WhatsAppSendOptions): Promise<S
       source: SOURCE_NAME,
       reportMonth: options.reportMonth,
       sentAt: new Date().toISOString(),
+      // nationalId is intentionally omitted: the WhatsApp template only uses
+      // first name + eligibility month, so the sensitive ID is not sent to the
+      // automation platform (data minimization).
       employees: messages.map((message) => ({
         employeeId: message.employeeId,
         name: message.name,
         firstName: message.firstName,
-        nationalId: message.nationalId,
         phone: message.phone,
         eligibilityMonth: message.eligibilityMonth,
         text: message.text,

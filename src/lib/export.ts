@@ -9,6 +9,17 @@ interface WorkbookRow {
   [key: string]: string | number | boolean | null
 }
 
+// Prevent spreadsheet formula injection: a string value beginning with a
+// formula trigger (= + - @, tab, CR) is prefixed with an apostrophe so the
+// exported file opens it as literal text — not an executable formula — on the
+// pension agent's machine.
+function sanitizeCellValue<T>(value: T): T | string {
+  if (typeof value === 'string' && /^[=+\-@\t\r]/.test(value)) {
+    return "'" + value
+  }
+  return value
+}
+
 export async function exportRowsToWorkbook(
   rows: WorkbookRow[],
   fileName: string,
@@ -16,7 +27,12 @@ export async function exportRowsToWorkbook(
 ): Promise<void> {
   const xlsx = await import('xlsx')
   const runtime = (xlsx.default ?? xlsx) as typeof xlsx
-  const worksheet = runtime.utils.json_to_sheet(rows)
+  const safeRows = rows.map((row) =>
+    Object.fromEntries(
+      Object.entries(row as Record<string, unknown>).map(([k, v]) => [k, sanitizeCellValue(v)]),
+    ),
+  )
+  const worksheet = runtime.utils.json_to_sheet(safeRows)
   const workbook = runtime.utils.book_new()
   runtime.utils.book_append_sheet(workbook, worksheet, sheetName)
 
@@ -250,7 +266,7 @@ function buildActiveFundsSheet(
 
   let rowNumber = 3
   for (const entry of records) {
-    const values = ACTIVE_FUND_COLUMNS.map((column) => column.value(entry))
+    const values = ACTIVE_FUND_COLUMNS.map((column) => sanitizeCellValue(column.value(entry)))
     const added = sheet.insertRow(rowNumber, values)
     paintActiveFundsRow(added)
     rowNumber++
@@ -311,7 +327,7 @@ function appendAgentRow(
   row: PensionStatusRow,
   status: PensionStatus,
 ) {
-  const values = AGENT_COLUMNS.map((column) => column.value(row))
+  const values = AGENT_COLUMNS.map((column) => sanitizeCellValue(column.value(row)))
   const added = sheet.addRow(values)
   paintStatusRow(added, status)
 }

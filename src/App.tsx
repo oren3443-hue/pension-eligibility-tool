@@ -215,7 +215,11 @@ function App() {
   }, [employeeState])
 
   useEffect(() => {
-    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings))
+    // Persist UI preferences only. The sendKey is the webhook auth secret and
+    // is deliberately kept out of localStorage (memory-only for the session)
+    // so it cannot be read from a shared/kiosk browser profile or via XSS.
+    const { sendKey: _sendKey, ...persistable } = settings
+    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(persistable))
   }, [settings])
 
   function applyParsedFiles(parsedGroups: ParsedUploadedFile[][], options: { reset?: boolean }) {
@@ -1660,7 +1664,9 @@ function loadSettings(): AppSettings {
     if (!raw) return fallback
     const parsed = JSON.parse(raw) as Partial<AppSettings>
     return {
-      sendKey: parsed.sendKey ?? '',
+      // sendKey is intentionally never restored from storage — re-entered
+      // each session and held in memory only (see the persist effect).
+      sendKey: '',
       deadlineOverride: parsed.deadlineOverride ?? '',
       testPhone: parsed.testPhone ?? '',
       agentEmail: parsed.agentEmail ?? '',
